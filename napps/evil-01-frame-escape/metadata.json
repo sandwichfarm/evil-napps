@@ -1,0 +1,7 @@
+{
+  "id": "evil-01-frame-escape",
+  "title": "evil-01 frame escape",
+  "description": "Red team: attacks NAPP frame & origin isolation — launcher-origin serving, origin-scheme collisions, top navigation, popups, referrer leaks, frame census. Demo by default; VERY EVIL mode behind a typed gate.",
+  "requires": [],
+  "actions": []
+}

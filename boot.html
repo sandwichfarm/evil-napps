@@ -1,0 +1,169 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>napp boot</title>
+  </head>
+  <body>
+    <!--
+      evil-napps harness boot frame — a faithful miniature of the reference
+      launcher's boot.html (eskema/nostrapps). This frame runs at the napp's
+      OWN origin (<label>.localhost:<port>). It registers the origin's single
+      service worker (sw.js) and installs the napp's files into that origin's
+      IndexedDB, on command from the launcher only:
+
+        napp-install   {files:[{path,body,mime}], policy}   → clear + write all
+        napp-set-policy {policy}                             → rewrite /__policy__
+        napp-wipe                                            → wipe the origin
+        napp-read-files                                      → read files back
+
+      Command channel discipline (the reference's): every command must arrive
+      from the LAUNCHER origin — event.origin is checked, never a declared
+      field. A napp frame at this origin posts with origin <label>…, which
+      never matches. (evil-03 probes exactly this check; a launcher that
+      skips it is one postMessage from a file swap.)
+    -->
+    <script>
+      function reportError(err) {
+        try {
+          window.parent.postMessage(
+            { __nostrapps: 'napp-boot-error', error: err?.message || String(err) },
+            '*'
+          )
+        } catch (_) {}
+      }
+
+      window.addEventListener('error', e => reportError(e.error || e.message))
+      window.addEventListener('unhandledrejection', e => reportError(e.reason))
+      ;(async () => {
+        const DB_NAME = `files-${location.origin.split('://')[1]}`
+        const DB_VERSION = 1
+        const STORE = 'files'
+
+        function openDB() {
+          return new Promise((resolve, reject) => {
+            const req = indexedDB.open(DB_NAME, DB_VERSION)
+            req.onupgradeneeded = () => {
+              const db = req.result
+              if (!db.objectStoreNames.contains(STORE)) {
+                db.createObjectStore(STORE, { keyPath: 'path' })
+              }
+            }
+            req.onsuccess = () => resolve(req.result)
+            req.onerror = () => reject(req.error)
+          })
+        }
+
+        async function clearAll() {
+          const db = await openDB()
+          return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE, 'readwrite')
+            tx.objectStore(STORE).clear()
+            tx.oncomplete = () => { try { db.close() } catch {} ; resolve() }
+            tx.onerror = () => { try { db.close() } catch {} ; reject(tx.error) }
+          })
+        }
+
+        async function putFile(path, body, mime) {
+          const db = await openDB()
+          return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE, 'readwrite')
+            tx.objectStore(STORE).put({ path, body, mime })
+            tx.oncomplete = () => { try { db.close() } catch {} ; resolve() }
+            tx.onerror = () => { try { db.close() } catch {} ; reject(tx.error) }
+          })
+        }
+
+        async function getAllFiles() {
+          const db = await openDB()
+          return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE, 'readonly')
+            const req = tx.objectStore(STORE).getAll()
+            req.onsuccess = () => {
+              try { db.close() } catch {}
+              resolve((req.result || []).filter(r => r.path !== '/__policy__'))
+            }
+            req.onerror = () => { try { db.close() } catch {} ; reject(req.error) }
+          })
+        }
+
+        async function wipeAll() {
+          await clearAll()
+          try { localStorage.clear() } catch {}
+          try { sessionStorage.clear() } catch {}
+          if (typeof caches !== 'undefined') {
+            try {
+              const keys = await caches.keys()
+              await Promise.all(keys.map(k => caches.delete(k)))
+            } catch {}
+          }
+        }
+
+        try {
+          const reg = await navigator.serviceWorker.register('/sw.js')
+          await navigator.serviceWorker.ready
+          try {
+            await reg.update()
+          } catch {}
+          if (!navigator.serviceWorker.controller) {
+            await new Promise(resolve => {
+              navigator.serviceWorker.addEventListener('controllerchange', resolve, { once: true })
+              setTimeout(resolve, 3000)
+            })
+          }
+        } catch (err) {
+          reportError(err)
+          return
+        }
+
+        // Commands come from the launcher only. This frame's host is
+        // <label>.<launcher host>, so the launcher is that minus the label;
+        // any other sender (a napp, this origin's own windows included) is
+        // ignored — it could otherwise wipe a napp or swap its files.
+        const LAUNCHER = `${location.protocol}//${location.host.slice(location.host.indexOf('.') + 1)}`
+
+        window.addEventListener('message', async event => {
+          const data = event.data
+          if (!data || event.origin !== LAUNCHER) return
+          if (data.__nostrapps === 'napp-install') {
+            try {
+              await clearAll()
+              for (const f of data.files) {
+                await putFile(f.path, f.body, f.mime)
+              }
+              if (data.policy) {
+                await putFile('/__policy__', JSON.stringify(data.policy), 'application/json')
+              }
+              event.source.postMessage({ __nostrapps: 'napp-install-done', fileCount: data.files.length }, event.origin)
+            } catch (err) {
+              event.source.postMessage({ __nostrapps: 'napp-install-error', error: err.message }, event.origin)
+            }
+          } else if (data.__nostrapps === 'napp-set-policy') {
+            try {
+              await putFile('/__policy__', JSON.stringify(data.policy || {}), 'application/json')
+              event.source.postMessage({ __nostrapps: 'napp-set-policy-done' }, event.origin)
+            } catch (err) {
+              event.source.postMessage({ __nostrapps: 'napp-set-policy-error', error: err.message }, event.origin)
+            }
+          } else if (data.__nostrapps === 'napp-wipe') {
+            try {
+              await wipeAll()
+              event.source.postMessage({ __nostrapps: 'napp-wipe-done' }, event.origin)
+            } catch (err) {
+              event.source.postMessage({ __nostrapps: 'napp-wipe-error', error: err.message }, event.origin)
+            }
+          } else if (data.__nostrapps === 'napp-read-files') {
+            try {
+              const files = await getAllFiles()
+              event.source.postMessage({ __nostrapps: 'napp-read-files-done', files }, event.origin)
+            } catch (err) {
+              event.source.postMessage({ __nostrapps: 'napp-read-files-error', error: err.message }, event.origin)
+            }
+          }
+        })
+
+        window.parent.postMessage({ __nostrapps: 'napp-boot-ready' }, '*')
+      })()
+    </script>
+  </body>
+</html>

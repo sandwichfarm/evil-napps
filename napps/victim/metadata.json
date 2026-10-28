@@ -1,0 +1,7 @@
+{
+  "id": "victim",
+  "title": "Victim Notes",
+  "description": "Benign harness fixture: persists a per-origin secret and registers profile/view actions.",
+  "requires": [],
+  "actions": []
+}

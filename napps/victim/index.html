@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Victim Notes</title>
+<style>
+  body {
+    margin: 0;
+    background: #101820;
+    color: #cfe3d8;
+    font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    padding: 8px;
+  }
+  h1 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; margin: 0 0 6px; color: #6fae8f; }
+  p { margin: 4px 0; color: #8fa79b; }
+  #stored { color: #cfe3d8; }
+</style>
+</head>
+<body>
+  <!--
+    victim napp — the harness's benign fixture. It is what an origin
+    collision, a namespace squat, or a store poison lands on: it persists a
+    secret at its origin, registers actions, and keeps to itself.
+  -->
+  <h1>victim napp</h1>
+  <p>persisted secret at my origin (should be mine alone):</p>
+  <p id="stored"></p>
+  <p id="actions"></p>
+<script>
+'use strict';
+(function () {
+  // The secret an origin collision steals (evil-01) or a same-origin mistake
+  // exposes. Realistic shape: a napp that keeps its user's local state.
+  const SECRET = 'v1-victim-secret-ORIGIN-SCOPE-' + Math.floor(Date.now() / 1000);
+  try { localStorage.setItem('__victim_secret__', SECRET); } catch (e) {}
+  try { localStorage.setItem('__victim_notes__', JSON.stringify({ drafts: ['private draft one', 'private draft two'] })); } catch (e) {}
+  document.getElementById('stored').textContent = SECRET.slice(0, 18) + '…(local only)';
+
+  // Registers the actions other apps dispatch to (evil-04's target).
+  const acts = [];
+  const reg = (pattern) => {
+    if (window.napp && typeof window.napp.registerAction === 'function') {
+      window.napp.registerAction(pattern, (name, payload) => {
+        document.getElementById('actions').textContent =
+          'received action ' + name + ' (payload: ' + JSON.stringify(payload).slice(0, 40) + ')';
+        return { handledBy: 'victim', name };
+      });
+    }
+    acts.push(pattern);
+  };
+  reg('profile');
+  reg('view');
+  document.getElementById('actions').textContent = 'registered: ' + acts.join(', ');
+})();
+</script>
+</body>
+</html>
