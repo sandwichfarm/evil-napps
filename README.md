@@ -67,7 +67,19 @@ marked as such in [ROADMAP.md](ROADMAP.md).
 
 **All eight rungs are built and validated** — 164 automated checks against real
 Chromium (`tests/`). Per-rung status and validated findings (including the
-source-validated reference-launcher gaps) live in [ROADMAP.md](ROADMAP.md).
+source-validated reference-launcher gaps) live in [ROADMAP.md](ROADMAP.md),
+and each napp folder carries its own README (rows, arming knobs, payloads):
+
+| Rung | Checks | Headline validated findings |
+|------|--------|-----------------------------|
+| [evil-01 frame escape](napps/evil-01-frame-escape/) | 38 | sandbox/origin isolation is all launcher policy; naive origin schemes collide (`victim~one` ≡ `victim-one` — the reference's *retired* scheme); boot frames live at the napp's own origin (scriptable by design) |
+| [evil-02 launcher XSS](napps/evil-02-launcher-xss/) | 19 | unsigned `metadata.json` rendered as HTML = launcher-origin script; **forged allow-always grant → silent signing with zero prompts**; the launcher's own CSP is the last line of defense (and requires externalized scripts) |
+| [evil-03 bridge forge](napps/evil-03-bridge-forge/) | 18 | declared-instanceId routers charge the victim's approval record; **the reference router never checks `MessageEvent.source`**; **the reference bridge resolves replies with no source check — arms in every preset**; unchecked boot channel = cross-app file swap. **New reference finding:** `sw.js`'s ready-tag injection is string surgery a napp's bytes can split |
+| [evil-04 action squat](napps/evil-04-action-squat/) | 16 | sole-handler auto-pick routes the launcher's own dispatches to the squatter **silently once the legit app closes**; the `"view"` wildcard collects every `view:<kind>`; poisoned results round-trip into callers' code |
+| [evil-05 store poison](napps/evil-05-store-poison/) | 15 | **the reference's `nostrdb.remove`: no gate, no author check** — remove+restore proves cross-app censorship; `remove(allIds)` wipes the launcher-wide store |
+| [evil-06 signer abuse](napps/evil-06-signer-abuse/) | 22 | the full prompt-policy space (deny holds / dialog-measurable / auto-allow = silent signing); nip44-to-attacker-key private-data drop; `utils.subscribe` filter-as-payload exfil (reads never prompt) |
+| [evil-07 persistence](napps/evil-07-persistence/) | 18 | the reference stubs the SW slot (validated from source); unstubbed = real attempts; **the at-launcher mistake lets the shipped SW register at the launcher origin and serve its own bytes**; markers survive launcher reloads |
+| [evil-08 hardened oracles](napps/evil-08-hardened-oracles/) | 18 | store-traffic analysis **arms in every preset** (a protocol property); the approval/presence oracle reads the policy off the store; TOCTOU demonstrated (no content addressing anywhere in NAPP.md); partitioned-storage nuance |
 
 Each rung is a self-contained NAPP artifact folder
 (`napps/<id>/{index.html,metadata.json}`) you can install into **any** NAPP
