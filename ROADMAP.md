@@ -52,14 +52,45 @@ Findings against the *reference* launcher, from reading its source
   sanitized to one label and served each other's files. Any launcher that
   slugs instead of hashing walks into this today.
 
-### `evil-02-launcher-xss` — unsigned metadata rendered as HTML *(planned)*
+### ✅ `evil-02-launcher-xss` — unsigned metadata rendered as HTML
+
+Status: **built + validated** — 19/19 (`tests/evil-02.spec.mjs`)
 
 `metadata.json` is attacker-controlled bytes (a local folder or an nsite the
-launcher fetched). Probes: `title`/`description` rendered via `innerHTML` in
-the launcher origin (the card list, the permission prompt, the handler
-picker), icon URLs as injection vectors, and the launcher's own CSP as the
-last line of defense. Evil payload: launcher-origin XSS → read the permission
-grant store, forge grants, deface, exfil.
+launcher fetched from relays); NAPP.md never promises its fields are safe
+HTML, and a launcher must put them into its own DOM somewhere — app cards,
+permission prompts, handler pickers, window titles. The payloads live *in*
+this napp's own metadata.json: the `description` carries an element-injection
+implant (`<img src=x onerror=…>`), the `icon` an attribute-injection
+breakout (`x" onerror="…"`). Each implant reports back to the napp over
+postMessage and parks; demo mode does nothing else (validated: zero exfil
+requests under the unsafe preset).
+
+Validated results:
+
+- **safe render (the reference behavior) holds every row** — and the card
+  shows the payload as inert text, which is what a user of a safe launcher
+  would actually see.
+- **`innerHTML` render arms both vectors** — element injection (description)
+  and attribute injection (icon) execute at the launcher origin and call
+  back. Two independent vectors, one lesson: every metadata field needs the
+  same treatment.
+- **the launcher's own CSP is the last line of defense — validated**: with
+  `script-src 'self'` (and the launcher's own script externalized, which the
+  harness now models), the same unsafe render holds every payload. A CSP that
+  still allows inline handlers is no defense at all.
+- **VERY EVIL: what launcher-origin XSS buys, end to end** — the armed implant
+  reads the permission-decision store and the launcher canaries, **forges an
+  allow-always `signEvent` decision**, exfiltrates all of it, and the
+  `silent-sign` row then signs a marker note through the bridge **with no
+  prompt ever shown** (prompt counter: 0, prompts knob still on `prompt`).
+  The bridge's entire permission model inverts: grants become attacker
+  state.
+
+Reference-launcher note (from source): nostrapps renders names and cards via
+`textContent`/element builders; its only `innerHTML` feeds a fixed icon set
+(`system-napps/ui.ts`) — the reference holds this rung by construction. The
+knob exists because the protocol can't make anyone else hold it.
 
 ## Tier 1 — bridge confusion (lazy launchers)
 

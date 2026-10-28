@@ -2,5 +2,9 @@
   {
     "id": "evil-01-frame-escape",
     "title": "evil-01 frame escape"
+  },
+  {
+    "id": "evil-02-launcher-xss",
+    "title": "evil-02 launcher xss"
   }
 ]

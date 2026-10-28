@@ -24,10 +24,11 @@ export const PORT = Number(process.env.EVIL_PORT || 8899);
 export const BASE = 'http://localhost:' + PORT;
 
 // ── static server (repo root), shared by all specs in this process ─────────
+// node (not python) so it can set per-request headers (the launcher-CSP knob)
 let server = null;
 async function ensureServer() {
   if (server) return server;
-  server = spawn('python3', ['-m', 'http.server', String(PORT)], { cwd: root, stdio: 'ignore' });
+  server = spawn('node', [join(root, 'tests', '_server.mjs'), String(PORT)], { cwd: root, stdio: 'ignore' });
   const t0 = Date.now();
   while (Date.now() - t0 < 15000) {
     try {
@@ -61,14 +62,22 @@ export async function loadHarness(page, opts = {}) {
   await page.goto(BASE + '/harness/');
   if (opts.preset) await page.check('input[name="preset"][value="' + opts.preset + '"]');
   if (opts.scheme) await page.check('input[name="scheme"][value="' + opts.scheme + '"]');
+  if (opts.render) await page.check('input[name="render"][value="' + opts.render + '"]');
   if (opts.atlauncher === true) await page.check('input[name="atlauncher"]');
   if (opts.victim === true) await page.check('input[name="victim"]');
   if (opts.referrer) await page.selectOption('select[name="referrer"]', opts.referrer);
+  if (opts.lcsp) await page.selectOption('select[name="lcsp"]', opts.lcsp);
   if (opts.router) await page.selectOption('select[name="router"]', opts.router);
   if (opts.prompts) await page.selectOption('select[name="prompts"]', opts.prompts);
   const wantId = opts.napp || await page.$eval('#nappSel', (el) => el.value);
   if (opts.napp) await page.selectOption('#nappSel', opts.napp);
-  await page.click('#loadBtn');
+  if (opts.lcsp) {
+    // the launcher CSP is a response header — reload the page under it;
+    // knobs (persisted to localStorage) restore and the auto-load runs
+    await page.goto(BASE + '/harness/' + (opts.lcsp === 'strict' ? '?lcsp=strict' : ''));
+  } else {
+    await page.click('#loadBtn');
+  }
   const f = await findEvilFrame(page, wantId);
   if (opts.settleMs !== 0) await waitSettled(f, opts.settleMs || 9000);
   return f;

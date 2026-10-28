@@ -60,7 +60,7 @@ marked as such in [ROADMAP.md](ROADMAP.md).
 
 | Tier | Target | Napps |
 |------|--------|-------|
-| 0 | Launcher misconfig — iframe sandbox/origin mistakes, unsigned `metadata.json` rendered as HTML, unvalidated action routing, missing launcher CSP | `evil-01` frame escape, `evil-02` launcher XSS |
+| 0 | Launcher misconfig — iframe sandbox/origin mistakes, unsigned `metadata.json` rendered as HTML, unvalidated action routing, missing launcher CSP | `evil-01` frame escape ✅, `evil-02` launcher XSS ✅ |
 | 1 | Bridge confusion — forged postMessage envelopes, reply injection, `registerAction` namespace squatting | `evil-03` bridge forge, `evil-04` action squat |
 | 2 | Shared state & authority abuse — `nostrdb` poisoning, silent signing, nip04/nip44 exfil, direct-relay egress, service-worker persistence | `evil-05` store poison, `evil-06` signer abuse, `evil-07` persistence |
 | 3 | Well-hardened launchers — what even a perfect launcher can't stop: cross-app traffic analysis, signing-latency oracles, URL-hosted TOCTOU, metadata impersonation, registry spoofing | `evil-08` hardened oracles |
@@ -75,7 +75,13 @@ launcher, or into the included victim harness. Artifacts are built from
 ```bash
 node build.mjs                        # build napps/<id>/ from src/
 node tests/evil-01.spec.mjs           # self-contained: starts its own server + Chromium
+node tests/evil-02.spec.mjs
+node tests/_server.mjs 8899            # or serve manually → http://localhost:8899/harness/
 ```
+
+The specs spin up their own static server (`tests/_server.mjs` — node, not
+python, because rungs need per-request header control, e.g. the launcher-CSP
+knob serving `script-src 'self'` on the harness page).
 
 The [harness](harness/index.html) is a deliberately misconfigurable victim
 launcher — a faithful miniature of the reference architecture (per-origin
@@ -99,10 +105,19 @@ different subset of the attacks:
 - **referrer policy** — `strict` (default: origin only) vs `full-url` (the
   launcher URL and its share-link payloads leak into every napp's
   `document.referrer`).
+- **metadata render** — `safe` (textContent — the reference behavior) vs
+  `unsafe` (innerHTML — a launcher card rendering unsigned `metadata.json`
+  bytes as HTML in the launcher origin) — arms evil-02's XSS tree.
+- **launcher CSP** — `none` (no header — common) vs `strict`
+  (`script-src 'self'`, the last line of defense; the harness's own script is
+  externalized so a hardened launcher keeps working) — the green gate under
+  an unsafe render.
+- **router discipline / prompts** — message-demux policy (strict source-check
+  vs the reference's origin+declared-instanceId vs declared-only) and the
+  permission-prompt policy — exercised by the tier 1–2 rungs.
 
-Later rungs add knobs for the bridge surface they attack (message-router
-discipline, boot-channel sender checks, permission-prompt policy, store
-mutation gates, registry/manifest behavior).
+Later rungs add knobs for the bridge surface they attack (boot-channel sender
+checks, store mutation gates, registry/manifest behavior).
 
 It also seeds launcher canaries (fake `nsec` and grant records in launcher
 `localStorage`), logs every ACCEPTED/DROPPED bridge message, and dumps the
@@ -123,8 +138,10 @@ boot.html                             # per-origin boot frame (SW registration +
 sw.js                                 # per-origin service worker (file serving, bridge injection)
 bridge.js                             # the NAPP bridge injected into napps
 harness/
-  index.html                          # configurable victim launcher
+  index.html + index.js               # configurable victim launcher (externalized script
+                                      #   so the strict-CSP knob can hold inline handlers)
 tests/
+  _server.mjs                        # node static server with per-request header control
   _helper.mjs + evil-NN.spec.mjs      # Playwright checks vs real Chromium
 ROADMAP.md                            # attack ladder + validated NAPP protocol findings
 ```
