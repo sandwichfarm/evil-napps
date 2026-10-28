@@ -6,5 +6,29 @@
   {
     "id": "evil-02-launcher-xss",
     "title": "evil-02 launcher xss"
+  },
+  {
+    "id": "evil-03-bridge-forge",
+    "title": "evil-03 bridge forge"
+  },
+  {
+    "id": "evil-04-action-squat",
+    "title": "evil-04 action squat"
+  },
+  {
+    "id": "evil-05-store-poison",
+    "title": "evil-05 store poison"
+  },
+  {
+    "id": "evil-06-signer-abuse",
+    "title": "evil-06 signer abuse"
+  },
+  {
+    "id": "evil-07-persistence",
+    "title": "evil-07 persistence"
+  },
+  {
+    "id": "evil-08-hardened-oracles",
+    "title": "evil-08 hardened oracles"
   }
 ]

@@ -45,7 +45,7 @@ async function handleFetch(req, url) {
       const text = typeof record.body === 'string' ? record.body : await record.body.text()
       const policy = await readPolicy()
       const grants = grantsFor(policy)
-      return new Response(injectBridge(text, { domains: grants }), {
+      return new Response(injectBridge(text, { domains: grants, policy }), {
         status: 200,
         headers: htmlHeaders(policy)
       })
@@ -160,13 +160,17 @@ async function readPolicy() {
   }
 }
 
-function injectBridge(html, { domains = [] } = {}) {
+function injectBridge(html, { domains = [], policy = null } = {}) {
   // The shell declares the granted capability domains as window.__nappDomains
   // BEFORE bridge.js runs (the NAPP presence model); `<` is escaped so a
-  // domain string can never break out of the inline script.
+  // domain string can never break out of the inline script. The launcher's
+  // per-origin policy flags (swstub, victimNoisy instrumentation) ride along.
+  const flags = policy ? { swstub: policy.swstub !== false, victimNoisy: policy.victimNoisy === true } : {}
   const domainsScript =
     '<script>window.__nappDomains=' +
     JSON.stringify(domains).replace(/</g, '\\u003c') +
+    ';window.__nappFlags=' +
+    JSON.stringify(flags).replace(/</g, '\\u003c') +
     '</script>'
   const headInject = domainsScript + '<script src="/bridge.js"></script>'
   const readyTag =

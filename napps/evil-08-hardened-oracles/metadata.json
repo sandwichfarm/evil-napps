@@ -1,0 +1,7 @@
+{
+  "id": "evil-08-hardened-oracles",
+  "title": "evil-08 hardened oracles",
+  "description": "Red team: what even a perfect launcher can't stop — cross-app traffic analysis through the shared store, prompt-policy and presence oracles, URL-hosted unverified bytes (TOCTOU), metadata impersonation. Demo by default; VERY EVIL mode behind a typed gate.",
+  "requires": [],
+  "actions": []
+}

@@ -69,6 +69,11 @@ export async function loadHarness(page, opts = {}) {
   if (opts.lcsp) await page.selectOption('select[name="lcsp"]', opts.lcsp);
   if (opts.router) await page.selectOption('select[name="router"]', opts.router);
   if (opts.prompts) await page.selectOption('select[name="prompts"]', opts.prompts);
+  if (opts.pickpolicy) await page.selectOption('select[name="pickpolicy"]', opts.pickpolicy);
+  if (typeof opts.bootcheck === 'boolean') opts.bootcheck ? await page.check('input[name="bootcheck"]') : await page.uncheck('input[name="bootcheck"]');
+  if (typeof opts.removegate === 'boolean') opts.removegate ? await page.check('input[name="removegate"]') : await page.uncheck('input[name="removegate"]');
+  if (typeof opts.swstub === 'boolean') opts.swstub ? await page.check('input[name="swstub"]') : await page.uncheck('input[name="swstub"]');
+  if (typeof opts.victimnoisy === 'boolean') opts.victimnoisy ? await page.check('input[name="victimnoisy"]') : await page.uncheck('input[name="victimnoisy"]');
   const wantId = opts.napp || await page.$eval('#nappSel', (el) => el.value);
   if (opts.napp) await page.selectOption('#nappSel', opts.napp);
   if (opts.lcsp) {

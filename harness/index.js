@@ -73,7 +73,23 @@
       lcsp: f.get('lcsp'),
       router: f.get('router'),
       prompts: f.get('prompts'),
+      pickpolicy: f.get('pickpolicy'),
+      bootcheck: f.get('bootcheck') === 'on',
+      removegate: f.get('removegate') === 'on',
+      swstub: f.get('swstub') === 'on',
+      victimnoisy: f.get('victimnoisy') === 'on',
       napp: nappSel.value,
+    };
+  }
+  function policyFor() {
+    const k = knobValues();
+    return {
+      domains: ['identity', 'network'],
+      v: 2,
+      referrer: k.referrer,
+      bootOpen: !k.bootcheck,   // the boot channel's sender check (evil-03)
+      swstub: k.swstub,        // the SW-registration stub (evil-07)
+      victimNoisy: k.victimnoisy, // harness instrumentation (evil-08)
     };
   }
   function persistKnobs() {
@@ -87,10 +103,15 @@
       if (k.render) { const el = controls.querySelector('input[name="render"][value="' + k.render + '"]'); if (el) el.checked = true; }
       if (typeof k.atlauncher === 'boolean') controls.querySelector('input[name="atlauncher"]').checked = k.atlauncher;
       if (typeof k.victim === 'boolean') controls.querySelector('input[name="victim"]').checked = k.victim;
+      if (typeof k.bootcheck === 'boolean') controls.querySelector('input[name="bootcheck"]').checked = k.bootcheck;
+      if (typeof k.removegate === 'boolean') controls.querySelector('input[name="removegate"]').checked = k.removegate;
+      if (typeof k.swstub === 'boolean') controls.querySelector('input[name="swstub"]').checked = k.swstub;
+      if (typeof k.victimnoisy === 'boolean') controls.querySelector('input[name="victimnoisy"]').checked = k.victimnoisy;
       if (k.referrer) controls.querySelector('select[name="referrer"]').value = k.referrer;
       if (k.lcsp) controls.querySelector('select[name="lcsp"]').value = k.lcsp;
       if (k.router) controls.querySelector('select[name="router"]').value = k.router;
       if (k.prompts) controls.querySelector('select[name="prompts"]').value = k.prompts;
+      if (k.pickpolicy) controls.querySelector('select[name="pickpolicy"]').value = k.pickpolicy;
       return k;
     } catch (_) { return {}; }
   }
@@ -182,14 +203,50 @@
       dlgTitle.textContent = 'Permission request — ' + (nappId || 'unknown') + ' wants to ' + method;
       dlgBody.textContent = detail || '(no detail provided by the launcher)';
       dlg.classList.add('open');
+      let settled = false;
       const done = v => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
         dlg.classList.remove('open');
         for (const id of ['dlgAllow', 'dlgAlways', 'dlgDeny']) document.getElementById(id).onclick = null;
         resolve(v);
       };
+      // stale prompts auto-dismiss (a real launcher dismisses abandoned asks)
+      const timer = setTimeout(() => done('deny-once'), 4000);
       document.getElementById('dlgAllow').onclick = () => done('allow-once');
       document.getElementById('dlgAlways').onclick = () => done('allow-always');
       document.getElementById('dlgDeny').onclick = () => done('deny-once');
+    });
+  }
+  // A generic choice dialog (the handler picker, evil-04's ambiguous-dispatch
+  // prompt) with the same stale-dismiss.
+  function openChoice(title, bodyText, choices, ms) {
+    window.__pickerCount = (window.__pickerCount || 0) + 1;
+    return new Promise(resolve => {
+      const row = dlg.querySelector('.row');
+      const olds = [...row.children];
+      olds.forEach(c => c.remove());
+      dlgTitle.textContent = title;
+      dlgBody.textContent = bodyText;
+      let settled = false;
+      const done = v => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        dlg.classList.remove('open');
+        row.textContent = '';
+        olds.forEach(c => row.appendChild(c));
+        resolve(v);
+      };
+      for (const c of choices) {
+        const b = document.createElement('button');
+        b.textContent = c.label;
+        b.onclick = () => done(c.value);
+        row.appendChild(b);
+      }
+      const timer = setTimeout(() => done(null), ms || 5000);
+      dlg.classList.add('open');
     });
   }
   async function requireApproval(nappId, method, detail) {
@@ -481,8 +538,14 @@
       case 'nostrdb.remove': {
         // THE REFERENCE'S GAP (validated from source): deletes by id with no
         // permission gate and no author check. Any napp can censor the
-        // launcher-wide store. evil-05 demonstrates.
+        // launcher-wide store. evil-05 demonstrates; the `removegate` knob
+        // models a launcher that prompts.
         const ids = Array.isArray(params && params.ids) ? params.ids : [];
+        if (knobValues().removegate && ids.length) {
+          const allowed = await requireApproval(win.nappId, 'nostrdb.remove',
+            'delete ' + ids.length + ' event(s) by id from the SHARED store (no author check in the protocol)');
+          if (!allowed) throw new Error('Permission denied: nostrdb.remove');
+        }
         let n = 0;
         for (const id of ids) {
           const i = store.findIndex(e => e.id === id);
@@ -560,14 +623,33 @@
   async function dispatchAction(callerWin, params) {
     const name = params.name;
     if (!name) throw new Error('napp.action: action name is required');
-    const candidates = [...wins.values()].filter(w => {
+    let candidates = [...wins.values()].filter(w => {
       const list = registry.get(w.instanceId) || [];
       return list.some(r => patternMatches(r.pattern, name));
     });
     if (!candidates.length) throw new Error('no handler registered for ' + name);
-    const target = params.options && params.options.instance
+    const pick = knobValues().pickpolicy;
+    if (pick === 'newest') candidates = candidates.reverse(); // newest-mounted first
+    let target = params.options && params.options.instance
       ? wins.get(params.options.instance)
-      : candidates[0]; // first candidate wins — the auto-pick evil-04 attacks
+      : null;
+    if (!target) {
+      if (candidates.length === 1) {
+        target = candidates[0]; // the reference's auto-pick: sole handler, no prompt
+      } else if (pick === 'sole-auto') {
+        // the reference's ambiguous case: ASK (a user can still be fooled —
+        // or not be there at all; the stale-dismiss aborts)
+        const choice = await openChoice(
+          'Which app handles "' + name + '"?',
+          'Multiple registered handlers. The launcher cannot know which you meant.',
+          candidates.map(w => ({ label: w.title + ' (' + w.instanceId + ')', value: w.instanceId }))
+        );
+        if (!choice) throw new Error('handler picker dismissed');
+        target = wins.get(choice);
+      } else {
+        target = candidates[0]; // first | newest: silent pick — evil-04's squat
+      }
+    }
     if (!target) throw new Error('no such instance');
     const reg = await waitForRegisteredAction(target.instanceId, name);
     const requestId = 'req' + (++dispatchSerial);
@@ -624,11 +706,7 @@
     const label = await labelFor(opts.nappId, knobs.scheme);
     const origin = originForLabel(label);
     const { meta: m, files } = await fetchNappFiles(opts.nappDir);
-    const policy = {
-      domains: ['identity', 'network'],
-      v: 2,
-      referrer: knobs.referrer,
-    };
+    const policy = policyFor();
     await bootNapp(opts.nappId, origin, files, policy);
     const w = mount({
       nappId: opts.nappId, title: opts.title || m.title,
@@ -651,7 +729,7 @@
     document.getElementById('referrerMeta').setAttribute('content',
       knobs.referrer === 'full' ? 'unsafe-url' : 'strict-origin-when-cross-origin');
     teardown();
-    log('── load: preset=' + knobs.preset + ' scheme=' + knobs.scheme + ' atlauncher=' + knobs.atlauncher + ' victim=' + knobs.victim + ' referrer=' + knobs.referrer + ' render=' + knobs.render + ' lcsp=' + knobs.lcsp + ' router=' + knobs.router + ' prompts=' + knobs.prompts);
+    log('── load: preset=' + knobs.preset + ' scheme=' + knobs.scheme + ' atlauncher=' + knobs.atlauncher + ' victim=' + knobs.victim + ' referrer=' + knobs.referrer + ' render=' + knobs.render + ' lcsp=' + knobs.lcsp + ' router=' + knobs.router + ' prompts=' + knobs.prompts + ' pickpolicy=' + knobs.pickpolicy + ' bootcheck=' + knobs.bootcheck + ' removegate=' + knobs.removegate + ' swstub=' + knobs.swstub + ' victimnoisy=' + knobs.victimnoisy);
 
     let evilLaunched = false;
     if (knobs.victim) {
@@ -683,9 +761,42 @@
     dumpStore();
   }
 
+  // ── launcher bar: the launcher's own action dispatches (evil-04's target)
+  // and the byte-swap debug control (evil-08's TOCTOU demonstration) ─────
+  function wireLauncherBar() {
+    const payloadInput = document.getElementById('dispatchPayload');
+    const dispatch = (name) => {
+      void dispatchAction(null, { name, payload: payloadInput.value }).then(
+        (result) => log('[launcher] action ' + name + ' result: ' + JSON.stringify(result).slice(0, 120)),
+        (err) => log('[launcher] action ' + name + ' failed: ' + String(err && err.message || err))
+      );
+    };
+    document.getElementById('dispatchProfile').addEventListener('click', () => dispatch('profile'));
+    document.getElementById('dispatchView1').addEventListener('click', () => dispatch('view:1'));
+
+    // evil-08 debug: re-install the evil napp's bytes with a modified
+    // metadata.json and reload its window — the protocol has no mechanism
+    // that would make this swap visible to anyone; only launcher pinning
+    // policy (not protocol) could.
+    document.getElementById('swapFiles').addEventListener('click', () => { void (async () => {
+      const knobs = knobValues();
+      if (!knobs.napp) return;
+      const w = [...wins.values()].find(x => x.nappId === knobs.napp);
+      if (!w || w.atLauncher) { log('[swap] needs an SW-pipeline napp window'); return; }
+      const { meta: m, files } = await fetchNappFiles(knobs.napp);
+      const swapped = { ...m, evil08swap: new Date().toISOString() };
+      const files2 = files.map(f => f.path === '/metadata.json'
+        ? { ...f, body: JSON.stringify(swapped) } : f);
+      await bootNapp(knobs.napp, w.origin, files2, policyFor());
+      log('[swap] re-installed the napp\'s bytes with a modified metadata.json — reloading its window (no protocol alarm fired)');
+      w.iframe.src = w.origin + '/';
+    })(); });
+  }
+
   // ── boot ──────────────────────────────────────────────────────────────────
   async function boot() {
     const saved = restoreKnobs();
+    wireLauncherBar();
 
     // The launcher-CSP knob is a real response header (set by the test
     // server) — sync the URL to it and reload once on a change.

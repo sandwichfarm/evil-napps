@@ -14,37 +14,65 @@
   }
   h1 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; margin: 0 0 6px; color: #6fae8f; }
   p { margin: 4px 0; color: #8fa79b; }
-  #stored { color: #cfe3d8; }
+  #stored, #feed, #actions, #publishes { color: #cfe3d8; overflow-wrap: anywhere; }
+  .row { display: flex; gap: 8px; }
+  .row span { flex: 1; }
 </style>
 </head>
 <body>
   <!--
-    victim napp — the harness's benign fixture. It is what an origin
-    collision, a namespace squat, or a store poison lands on: it persists a
-    secret at its origin, registers actions, and keeps to itself.
+    victim napp v2 — the harness's benign fixture, modeling what a real NAPP
+    does through the bridge: persists per-origin state, registers actions,
+    polls the shared store, keeps a live feed, posts activity notes, and
+    delegates profile views to other apps. evil-03..08 attack these surfaces.
+
+    The __victimEcho broadcasts are harness instrumentation for the red team:
+    every bridge result is echoed to all sibling frames so an evil napp (and
+    the specs) can observe what this app's bridge traffic actually does.
   -->
   <h1>victim napp</h1>
   <p>persisted secret at my origin (should be mine alone):</p>
   <p id="stored"></p>
+  <p>store poll (nostrdb.query kinds:[1]):</p>
+  <p id="feed"></p>
+  <p>actions received / dispatched:</p>
   <p id="actions"></p>
+  <p>publish attempts (gated):</p>
+  <p id="publishes"></p>
 <script>
 'use strict';
 (function () {
-  // The secret an origin collision steals (evil-01) or a same-origin mistake
-  // exposes. Realistic shape: a napp that keeps its user's local state.
   const SECRET = 'v1-victim-secret-ORIGIN-SCOPE-' + Math.floor(Date.now() / 1000);
   try { localStorage.setItem('__victim_secret__', SECRET); } catch (e) {}
   try { localStorage.setItem('__victim_notes__', JSON.stringify({ drafts: ['private draft one', 'private draft two'] })); } catch (e) {}
   document.getElementById('stored').textContent = SECRET.slice(0, 18) + '…(local only)';
 
-  // Registers the actions other apps dispatch to (evil-04's target).
+  // red-team detection channel: every bridge result is broadcast to sibling
+  // frames (harness instrumentation, clearly named)
+  function echo(what, result) {
+    try {
+      const frames = window.parent.frames;
+      for (let i = 0; i < frames.length; i++) {
+        if (frames[i] !== window) {
+          try { frames[i].postMessage({ __victimEcho: { what, result, at: Date.now() } }, '*'); } catch (_) {}
+        }
+      }
+    } catch (_) {}
+  }
+  window.addEventListener('message', (e) => {
+    const d = e.data && e.data.__victimEchoCheck;
+    if (d) echo('echo-check', { ok: true });
+  });
+
   const acts = [];
   const reg = (pattern) => {
     if (window.napp && typeof window.napp.registerAction === 'function') {
       window.napp.registerAction(pattern, (name, payload) => {
         document.getElementById('actions').textContent =
-          'received action ' + name + ' (payload: ' + JSON.stringify(payload).slice(0, 40) + ')';
-        return { handledBy: 'victim', name };
+          'received ' + name + ' (payload: ' + JSON.stringify(payload).slice(0, 60) + ')';
+        const result = { handledBy: 'victim', name };
+        echo('action-handled', { name, result });
+        return result;
       });
     }
     acts.push(pattern);
@@ -52,6 +80,79 @@
   reg('profile');
   reg('view');
   document.getElementById('actions').textContent = 'registered: ' + acts.join(', ');
+
+  // poll the shared store
+  async function poll() {
+    try {
+      if (!window.nostrdb) return;
+      const evs = await window.nostrdb.query({ kinds: [1], limit: 3 });
+      document.getElementById('feed').textContent =
+        (evs || []).length + ' event(s): ' + (evs || []).map(e => (e.content || '').slice(0, 24)).join(' | ');
+      echo('nostrdb.query', evs);
+    } catch (err) { echo('nostrdb.query-error', String(err)); }
+  }
+  void poll();
+  setInterval(poll, 4000);
+
+  // live feed (subscription callbacks — evil-03's reply-injection target)
+  try {
+    if (window.napp && window.napp.utils && window.napp.utils.subscribe) {
+      window.napp.utils.subscribe(['wss://relay.example'], { kinds: [1] }, {
+        eoseEventsCallback(evs) { echo('feed-eose', evs); },
+        liveEventCallback(ev) { echo('feed-live', ev); },
+      });
+    }
+  } catch (err) { echo('feed-error', String(err)); }
+
+  // activity pings into the shared store (evil-08's traffic-analysis target)
+  let ping = 0;
+  setInterval(() => {
+    ping++;
+    try {
+      if (!window.nostrdb) return;
+      const id = ('' + ping).padStart(2, '0') + Array.from({ length: 62 }, () => 'ab'.charAt(Math.floor(Math.random() * 2))).join('');
+      window.nostrdb.add({
+        id, pubkey: '3d0e4f3a5c61787b90a1c2d3e4f5061728394a5b6c7d8e9fa0b1c2d3e4f50617',
+        created_at: Math.floor(Date.now() / 1000), kind: 1,
+        tags: [], content: 'victim activity ping ' + ping,
+        sig: Array.from({ length: 128 }, () => 'cd'.charAt(Math.floor(Math.random() * 2))).join(''),
+      });
+    } catch (err) { echo('add-error', String(err)); }
+  }, 5000);
+
+  // delegate profile views (evil-04's namespace-squat target)
+  setInterval(() => {
+    try {
+      if (!window.napp || typeof window.napp.action !== 'function') return;
+      window.napp.action('profile', { secret: 'VICTIM-DISPATCH-PAYLOAD-' + ping }).then(
+        (result) => { echo('action-dispatch-result', { action: 'profile', result }); },
+        (err) => { echo('action-dispatch-error', String(err)); }
+      );
+    } catch (err) { echo('action-dispatch-error', String(err)); }
+  }, 6000);
+
+  // gated publish attempts (evil-08's policy oracle; enabled by the
+  // victimNoisy knob — injected as a policy flag below)
+  let pubCount = 0;
+  setInterval(() => {
+    if (!(window.__nappFlags && window.__nappFlags.victimNoisy)) return;
+    pubCount++;
+    try {
+      if (!window.napp || !window.napp.utils || !window.napp.utils.publish) return;
+      const ev = {
+        id: ('p' + pubCount).padStart(2, '0') + Array.from({ length: 62 }, () => 'ef'.charAt(Math.floor(Math.random() * 2))).join(''),
+        pubkey: '3d0e4f3a5c61787b90a1c2d3e4f5061728394a5b6c7d8e9fa0b1c2d3e4f50617',
+        created_at: Math.floor(Date.now() / 1000), kind: 1,
+        tags: [], content: 'victim gated publish attempt ' + pubCount,
+        sig: Array.from({ length: 128 }, () => '0123456789abcdef'.charAt(Math.floor(Math.random() * 16))).join(''),
+      };
+      window.napp.utils.publish(ev, ['wss://victim-write-relay.example']).then(
+        (result) => { echo('publish-result', result); },
+        (err) => { echo('publish-error', String(err)); }
+      );
+      document.getElementById('publishes').textContent = pubCount + ' attempt(s) made';
+    } catch (err) { echo('publish-error', String(err)); }
+  }, 6000);
 })();
 </script>
 </body>

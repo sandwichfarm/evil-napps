@@ -61,21 +61,27 @@ marked as such in [ROADMAP.md](ROADMAP.md).
 | Tier | Target | Napps |
 |------|--------|-------|
 | 0 | Launcher misconfig — iframe sandbox/origin mistakes, unsigned `metadata.json` rendered as HTML, unvalidated action routing, missing launcher CSP | `evil-01` frame escape ✅, `evil-02` launcher XSS ✅ |
-| 1 | Bridge confusion — forged postMessage envelopes, reply injection, `registerAction` namespace squatting | `evil-03` bridge forge, `evil-04` action squat |
-| 2 | Shared state & authority abuse — `nostrdb` poisoning, silent signing, nip04/nip44 exfil, direct-relay egress, service-worker persistence | `evil-05` store poison, `evil-06` signer abuse, `evil-07` persistence |
-| 3 | Well-hardened launchers — what even a perfect launcher can't stop: cross-app traffic analysis, signing-latency oracles, URL-hosted TOCTOU, metadata impersonation, registry spoofing | `evil-08` hardened oracles |
+| 1 | Bridge confusion — forged postMessage envelopes, reply injection, `registerAction` namespace squatting | `evil-03` bridge forge ✅, `evil-04` action squat ✅ |
+| 2 | Shared state & authority abuse — `nostrdb` poisoning, silent signing, nip04/nip44 exfil, direct-relay egress, service-worker persistence | `evil-05` store poison ✅, `evil-06` signer abuse ✅, `evil-07` persistence ✅ |
+| 3 | Well-hardened launchers — what even a perfect launcher can't stop: cross-app traffic analysis, approval/presence oracles, URL-hosted TOCTOU, metadata impersonation | `evil-08` hardened oracles ✅ |
+
+**All eight rungs are built and validated** — 164 automated checks against real
+Chromium (`tests/`). Per-rung status and validated findings (including the
+source-validated reference-launcher gaps) live in [ROADMAP.md](ROADMAP.md).
 
 Each rung is a self-contained NAPP artifact folder
 (`napps/<id>/{index.html,metadata.json}`) you can install into **any** NAPP
 launcher, or into the included victim harness. Artifacts are built from
-`src/` (shared chrome + per-napp attack definitions) via `node build.mjs`.
+`src/` (shared chrome + per-napp attack definitions) via `node build.mjs`
+(`evil-07` also ships a real service-worker file; `victim/` is a static benign
+fixture whose bridge activity — store polls, live feeds, note pings, action
+delegations, result echoes — is what the rungs attack).
 
 ## Running locally
 
 ```bash
 node build.mjs                        # build napps/<id>/ from src/
-node tests/evil-01.spec.mjs           # self-contained: starts its own server + Chromium
-node tests/evil-02.spec.mjs
+for i in 01 02 03 04 05 06 07 08; do node tests/evil-$i.spec.mjs; done   # the whole suite
 node tests/_server.mjs 8899            # or serve manually → http://localhost:8899/harness/
 ```
 
@@ -112,12 +118,18 @@ different subset of the attacks:
   (`script-src 'self'`, the last line of defense; the harness's own script is
   externalized so a hardened launcher keeps working) — the green gate under
   an unsafe render.
-- **router discipline / prompts** — message-demux policy (strict source-check
-  vs the reference's origin+declared-instanceId vs declared-only) and the
-  permission-prompt policy — exercised by the tier 1–2 rungs.
-
-Later rungs add knobs for the bridge surface they attack (boot-channel sender
-checks, store mutation gates, registry/manifest behavior).
+- **router discipline / prompts / pick policy** — message-demux policy (strict
+  source-check vs the reference's origin+declared-instanceId vs declared-only),
+  the permission-prompt policy (prompt/auto-allow/deny-all), and the
+  ambiguous-action pick policy (the reference's ask-when-ambiguous vs silent
+  first/newest) — exercised by the tier 1–2 rungs.
+- **boot channel / remove gate / SW stub / noisy victim** — the boot frame's
+  sender check (evil-03), a gated `nostrdb.remove` vs the reference's ungated
+  one (evil-05), the bridge's service-worker stub (evil-07), and the victim's
+  gated publishes that feed the approval oracle (evil-08).
+- **launcher input bar** — the launcher's own `profile` / `view:1` dispatches
+  (evil-04's target) and a byte-swap debug control (evil-08's TOCTOU
+  demonstration).
 
 It also seeds launcher canaries (fake `nsec` and grant records in launcher
 `localStorage`), logs every ACCEPTED/DROPPED bridge message, and dumps the

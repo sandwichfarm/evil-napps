@@ -120,11 +120,34 @@
         // <label>.<launcher host>, so the launcher is that minus the label;
         // any other sender (a napp, this origin's own windows included) is
         // ignored — it could otherwise wipe a napp or swap its files.
+        // The harness `bootcheck` knob models a launcher that skips the
+        // check: the stored policy record's bootOpen flag opens the channel
+        // to any sender (evil-03 demonstrates the file swap).
         const LAUNCHER = `${location.protocol}//${location.host.slice(location.host.indexOf('.') + 1)}`
+
+        async function readStoredPolicy() {
+          try {
+            const db = await openDB()
+            const rec = await new Promise((resolve, reject) => {
+              const tx = db.transaction(STORE, 'readonly')
+              const r = tx.objectStore(STORE).get('/__policy__')
+              r.onsuccess = () => { try { db.close() } catch {} ; resolve(r.result ?? null) }
+              r.onerror = () => { try { db.close() } catch {} ; reject(r.error) }
+            })
+            if (!rec) return null
+            const text = typeof rec.body === 'string' ? rec.body : await rec.body.text()
+            return JSON.parse(text)
+          } catch (_) { return null }
+        }
+        async function bootOpen() {
+          const p = await readStoredPolicy()
+          return !!(p && p.bootOpen === true)
+        }
 
         window.addEventListener('message', async event => {
           const data = event.data
-          if (!data || event.origin !== LAUNCHER) return
+          if (!data) return
+          if (event.origin !== LAUNCHER && !(await bootOpen())) return
           if (data.__nostrapps === 'napp-install') {
             try {
               await clearAll()

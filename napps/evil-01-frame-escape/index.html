@@ -392,9 +392,11 @@
   }
   // A bridge rpc with the napp dialect this suite speaks (mirrors the
   // reference bridge.js): a postMessage envelope tagged __nostrapps:"rpc".
+  // The wait outlasts a permission dialog's stale-dismiss (4s) so a denied
+  // reply is never mistaken for silence.
   function bridgeRpc(method, params) {
     const id = 'evil-rpc-' + randId();
-    const p = waitForMsg(id, 4000);
+    const p = waitForMsg(id, 6500);
     postParent({
       __nostrapps: 'rpc', id: id, method: method,
       params: params, instanceId: window.name,

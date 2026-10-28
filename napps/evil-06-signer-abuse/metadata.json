@@ -1,0 +1,7 @@
+{
+  "id": "evil-06-signer-abuse",
+  "title": "evil-06 signer abuse",
+  "description": "Red team: the NIP-07 bridge hands the napp the user's signing and cipher authority behind a permission prompt — pubkey handout, prompt-policy silent signing, nip04/nip44 encryption to the attacker's key as a private-data egress channel, relay-REQ exfiltration. Demo by default; VERY EVIL mode behind a typed gate.",
+  "requires": [],
+  "actions": []
+}

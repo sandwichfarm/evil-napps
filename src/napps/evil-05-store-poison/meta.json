@@ -1,0 +1,7 @@
+{
+  "id": "evil-05-store-poison",
+  "title": "evil-05 store poison",
+  "description": "Red team: nostrdb is a launcher-wide store every app reads — remove() has no gate and no author check in the reference, add() accepts attacker-authored events. Censor, poison, wipe. Demo by default; VERY EVIL mode behind a typed gate.",
+  "requires": [],
+  "actions": []
+}

@@ -1,0 +1,7 @@
+{
+  "id": "evil-07-persistence",
+  "title": "evil-07 persistence",
+  "description": "Red team: a NAPP owns a real origin forever — service-worker slot, per-origin storage that survives launcher reloads, the Cache API. What the reference stubs and what it can't. Demo by default; VERY EVIL mode behind a typed gate.",
+  "requires": [],
+  "actions": []
+}

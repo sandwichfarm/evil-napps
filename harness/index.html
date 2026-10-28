@@ -95,7 +95,7 @@
     </label>
   </fieldset>
   <fieldset>
-    <legend>bridge discipline (later rungs)</legend>
+    <legend>bridge discipline</legend>
     <label>router
       <select name="router">
         <option value="strict" selected>strict — source-checked demux</option>
@@ -110,6 +110,20 @@
         <option value="deny">deny-all — refuse without asking</option>
       </select>
     </label>
+    <label>pick policy
+      <select name="pickpolicy">
+        <option value="sole-auto" selected>sole-auto — prompt when ambiguous (reference)</option>
+        <option value="first">first — silently first candidate</option>
+        <option value="newest">newest — silently newest-mounted (squat wins)</option>
+      </select>
+    </label>
+  </fieldset>
+  <fieldset>
+    <legend>gates (later rungs)</legend>
+    <label><input type="checkbox" name="bootcheck" checked> boot channel sender-check (reference)</label>
+    <label><input type="checkbox" name="removegate" > gate nostrdb.remove (reference: ungated)</label>
+    <label><input type="checkbox" name="swstub" checked> stub service-worker registration (reference)</label>
+    <label><input type="checkbox" name="victimnoisy"> victim makes gated publishes (evil-08 oracle)</label>
   </fieldset>
   <fieldset>
     <legend>napp</legend>
@@ -118,6 +132,13 @@
   </fieldset>
 </form>
 <div id="navprobe">⚠ THIS LAUNCHER WAS NAVIGATED BY A NAPP — window.top was replaced (top-nav channel OPEN). The relaunched frame below confirms it.</div>
+<div id="launcherBar" style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:8px 12px; border-bottom:1px solid #2e2940;">
+  <span style="color:#8d88a3; font-size:11px;">launcher input:</span>
+  <input id="dispatchPayload" type="text" value="LAUNCHER-DISPATCH-CANARY-open:profile:npub1victim…" spellcheck="false" style="flex:1; min-width:220px; background:#1f1b29; border:1px solid #2e2940; color:#e9e6f2; border-radius:6px; font:inherit; padding:3px 8px;">
+  <button type="button" id="dispatchProfile">dispatch profile</button>
+  <button type="button" id="dispatchView1">dispatch view:1</button>
+  <button type="button" id="swapFiles" title="evil-08 debug: re-install the evil napp's bytes with a modified metadata.json and reload its window">debug: swap evil bytes + reload</button>
+</div>
 <div id="meta">not loaded</div>
 <div id="stage">
   <div>

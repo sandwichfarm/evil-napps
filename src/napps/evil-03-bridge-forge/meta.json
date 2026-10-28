@@ -1,0 +1,7 @@
+{
+  "id": "evil-03-bridge-forge",
+  "title": "evil-03 bridge forge",
+  "description": "Red team: forged bridge envelopes — declared-instanceId routing, source-blind demux, bridge reply injection, boot-frame command forgery. Demo by default; VERY EVIL mode behind a typed gate.",
+  "requires": [],
+  "actions": []
+}

@@ -9,11 +9,13 @@
   // can't work through this harness's server (the script fetch bypasses the
   // controlling SW), and if it did succeed it would evict the launcher's SW
   // and break file serving — and persistence. Stubbed so such napps degrade
-  // gracefully (the reference does the same). evil-07 probes whether a
-  // launcher that DOESN'T stub hands out a persistent backdoor.
+  // gracefully (the reference does the same — unconditionally). The harness
+  // knob `swstub` models a launcher that DOESN'T stub: evil-07 probes what
+  // that hands out.
+  const swStubbed = !(window.__nappFlags && window.__nappFlags.swstub === false);
   try {
     const swc = navigator.serviceWorker
-    if (swc) {
+    if (swc && swStubbed) {
       const stub = {
         scope: location.origin + '/',
         active: null,

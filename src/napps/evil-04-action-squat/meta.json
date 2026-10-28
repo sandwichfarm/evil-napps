@@ -1,0 +1,7 @@
+{
+  "id": "evil-04-action-squat",
+  "title": "evil-04 action squat",
+  "description": "Red team: the registerAction namespace is global and unpolicable — squat the names a victim app dispatches to (profile, view), steal the payloads, poison the results. Demo by default; VERY EVIL mode behind a typed gate.",
+  "requires": [],
+  "actions": ["profile", "view"]
+}

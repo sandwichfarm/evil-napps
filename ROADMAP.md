@@ -93,86 +93,78 @@ Reference-launcher note (from source): nostrapps renders names and cards via
 knob exists because the protocol can't make anyone else hold it.
 
 ## Tier 1 — bridge confusion (lazy launchers)
+## Tier 1 — bridge confusion (lazy launchers)
 
-### `evil-03-bridge-forge` — envelope forging & reply injection *(planned)*
+### ✅ `evil-03-bridge-forge` — envelope forging & reply injection
 
-The bridge is `postMessage` with `'*'` target origins; the only sender
-identity is `MessageEvent.source` and the napp's origin. Probes: forged
-`__nostrapps` envelopes with declared `instanceId` (the reference demuxes by
-`origin + data.instanceId`, so *any frame at the napp origin* can impersonate
-*any instance of that app* — validated from source: `napp-window.ts`'s
-`messageHandler` checks `event.origin === origin && data.instanceId ===
-instanceId`, never `event.source`); sequential-id reply injection; dispatch
-result forgery (`napp-dispatch-result` settles the caller's promise with
-attacker data); boot-frame command forgery (`napp-install`/`napp-wipe` posted
-to the hidden boot iframe — the reference checks `event.origin === LAUNCHER`
-in `boot.html`, a launcher that doesn't is one postMessage from a file swap).
+Status: **built + validated** — 18/18 (`tests/evil-03.spec.mjs`)
 
-### `evil-04-action-squat` — `registerAction` namespace squatting *(planned)*
+The bridge is `postMessage` with `'*'` targets; the only sender identity is `MessageEvent.source` and the sender's origin. Validated results:
 
-NAPP.md: "There is no policing of what actions are allowed." Action names are
-a global namespace any installed app can claim: `profile`, `view`, `view:1`,
-`user-search`… Probes: registering the names a victim app dispatches to,
-auto-pick policies (the reference auto-selects the sole handler with no
-prompt — squatting `profile` receives the launcher's own profile dispatches),
-pattern rules (`"view"` matches `view:<any>`), and auxiliary/headless modes.
+- **a source-checked router (strict) holds every forged envelope** — a child frame's rpc claiming the victim's instanceId is dropped.
+- **a declared-instanceId router accepts cross-app forges**: the same envelope executes bound to the VICTIM's window — and a gated call then opens a dialog titled *"victim wants to signEvent"*: the forge charges the victim's approval record (validated via the dialog title).
+- **the reference router (origin + declared instanceId) never checks `MessageEvent.source`** (validated from source and reproduced): a same-origin srcdoc child of the napp — source ≠ any known window, origin = the napp's, declared instanceId = the napp's own — is accepted. Every frame at a napp's origin is every instance of that app: instance A can hijack instance B's dispatches, registrations and closes.
+- **the reference bridge.js resolves `rpc-result` / `napp-sub-callback` by id/callbackId alone — no source check** (validated from source): a forged subscription callback posted straight to the victim's Window (any sibling, via `parent.frames`) injects attacker events into its live feed. **Arms in every preset** — a reference-bridge finding, below every router.
+- **the boot channel's one check holds by default**: `event.origin === LAUNCHER` refuses the napp's commands. With it skipped (the knob), any napp sprays `napp-install` to the boot frames in the launcher's DOM and swaps any origin's bytes — VERY EVIL's read-back proves the takeover page is served at the victim's origin under the victim's window title.
+- **NEW finding (validated + reproduced): the reference sw.js's ready-tag injection uses `result.indexOf("</html>")`** — string surgery on napp bytes. A napp whose script contains that literal sequence gets its main script split mid-parse by the injected tag (this suite's own payload tripped it). Launcher fix: parse-based injection, not string surgery.
+
+### ✅ `evil-04-action-squat` — `registerAction` namespace squatting
+
+Status: **built + validated** — 16/16 (`tests/evil-04.spec.mjs`)
+
+NAPP.md: "There is no policing of what actions are allowed." Validated:
+
+- **sole-auto (the reference policy) asks on ambiguity** — the picker opened and nothing was routed without an answer. But close the legit app and the squatter becomes the SOLE handler: the launcher's own `profile` dispatch routes to it **silently, no prompt** (validated — the reference's auto-pick, from source). Ambiguity is a social attack, not a boundary.
+- **silent pick policies (first/newest) hand the namespace over without a dialog** (newest = the last-mounted app wins every name it registers).
+- **the `"view"` wildcard matches every `view:<kind>` dispatch** — one registered string collects all of them (validated via `view:1`).
+- **poisoned results round-trip into the caller's code**: the victim dispatched `profile`, the squatter answered, and the victim's own callback received the attacker's object as the action result.
 
 ## Tier 2 — shared state & authority abuse
 
-### `evil-05-store-poison` — `nostrdb` poisoning *(planned)*
+### ✅ `evil-05-store-poison` — `nostrdb` poisoning
 
-`window.nostrdb` is a launcher-wide store shared by every app. Probes:
-`nostrdb.remove` censoring other apps' data — validated from source: the
-reference's `nostrdb.remove` handler deletes by id with **no permission gate
-and no author check** (`GATED_METHODS` doesn't list it) — any napp can
-`query()` then `remove()` every event it dislikes; `add()` with crafted
-well-signed-but-attacker-owned events (kind confusion for every app that reads
-the store); `replaceable()` shadowing.
+Status: **built + validated** — 15/15 (`tests/evil-05.spec.mjs`)
 
-### `evil-06-signer-abuse` — silent signing & cipher exfiltration *(planned)*
+`window.nostrdb` is a launcher-wide store shared by every app. Validated:
 
-The NIP-07 bridge hands the app the user's signing authority behind a
-permission *prompt* — prompt quality is launcher policy. Probes: signEvent
-without a meaningful prompt (auto-allow knobs, "allow always" residue), the
-approval-detail fidelity (can the napp name one thing and sign another —
-`created_at`/tag mutation between display and dispatch is TOCTOU the launcher
-can't see), nip04/nip44 encrypt *to the attacker's pubkey* as a private-data
-egress channel, and `utils.publish` to attacker relays as the drop point.
+- **the reference's `nostrdb.remove` deletes by id with no permission gate and no author check** (validated from source): the demo removes and immediately restores the victim's event in one breath — cross-app censorship of the shared store, with the bridge's own blessing. A gated remove (the knob) + a prompt policy holds it.
+- **`add()` holds attribution, not intent** (id+sig verified — forged attribution is held): the poison is legitimately-signed attacker content — a lookalike kind 0, an attacker kind 10002 relay list, bait in kind 1 — all landing in what every store reader renders.
+- **one `remove(allIds)` wipes the launcher-wide store** for every app at once (VERY EVIL, destructive payload, runs last — validated empty).
 
-### `evil-07-persistence` — service-worker & origin persistence *(planned)*
+### ✅ `evil-06-signer-abuse` — silent signing & cipher exfiltration
 
-Each napp owns a real origin forever: per-origin `localStorage`, IndexedDB,
-and a service-worker slot (the reference's `sw.js` owns it and `bridge.js`
-stubs `serviceWorker.register` — a launcher that doesn't stub, or whose origin
-isn't SW-owned, hands the napp a persistent same-origin backdoor; the
-reference's own `boot.html` `unregisterForeignSWs` exists precisely because a
-napp *can* register one while `network` is granted). Probes: SW registration,
-`caches` persistence, marker survival across launcher reloads, and
-`napp.dev.installLocal` (the `dev` grant) as a persistence escalator.
+Status: **built + validated** — 22/22 (`tests/evil-06.spec.mjs`)
+
+The NIP-07 bridge's only boundary is the launcher's prompt policy. Validated across the whole policy space:
+
+- **pubkey handout** arms with the `identity` grant — no prompt, by design.
+- **deny-all holds; prompt = the dialog is all that stands** (its ~4s stale-dismissal is measurable from inside the napp — the latency is an oracle of the policy); **auto-allow = silent signing**: a marker note signed as the user, zero prompts, zero latency.
+- **nip44.encrypt to the attacker's key is a private-data drop**: the full chain validated — the victim's note read out of the shared store, encrypted to the attacker's pubkey through the user's own cipher authority, published toward attacker relays (RELAY-PUBLISH logged), ciphertext exfiltrated. The user's bridge did all the work.
+- **`utils.subscribe` never prompts (reads don't) and the REQ's filter travels verbatim**: the victim's note content carried out in a NIP-50 search term toward the attacker's relay (RELAY-REQ logged with the payload).
+
+### ✅ `evil-07-persistence` — service-worker & origin persistence
+
+Status: **built + validated** — 18/18 (`tests/evil-07.spec.mjs`)
+
+Each napp owns a real origin — durable state the protocol never mentions wiping. Validated:
+
+- **the reference holds the SW slot by STUBBING registration in bridge.js** (validated from source: unconditional stub + boot.html `unregisterForeignSWs` + `worker-src 'none'` while locked). Stubbed: `register()` resolves with a fake registration — the tell the probe uses.
+- **unstubbed, registration is attempted for real** — only the missing bytes at the origin hold it (SW script fetches bypass the controlling worker).
+- **under the at-launcher mistake the shipped, committed SW registers at the LAUNCHER origin**: a live persistent worker in the launcher's own origin, serving its own bytes through its scope (validated end-to-end: registration, scope, served-by-evil-SW response, `getRegistration`).
+- **per-origin storage survives a launcher reload** (same tab — validated); the Cache API is a durable origin store no permission system names.
+- **nuance**: `napp.dev.installLocal` (the `dev` grant) remains an unprobed persistence escalator — deferred.
 
 ## Tier 3 — well-hardened launchers (protocol-level)
 
-What even a perfect launcher cannot stop. These arm in the fully hardened
-preset — they are findings against the NAPP protocol, not the implementation.
+What even a perfect launcher cannot stop. These arm in the fully hardened preset — findings against the NAPP protocol, not the implementation.
 
-### `evil-08-hardened-oracles` — what a perfect launcher can't stop *(planned)*
+### ✅ `evil-08-hardened-oracles` — what a perfect launcher can't stop
 
-- **Cross-app traffic analysis:** `nostrdb.subscribe` observes every event
-  *any* app inserts into the shared store (validated from source:
-  `notifyStoreSubs` fans every saved event to every matching subscription,
-  whatever saved it) — a napp learns what other apps fetch, sync and publish.
-- **Signing-latency oracles:** timing `signEvent` approvals distinguishes
-  prompt-types, "always" residue, and the user's presence — an activity
-  oracle no prompt design fully closes.
-- **TOCTOU of URL-hosted apps:** a napp is bytes fetched by manifest every
-  load; there is no content addressing *in the protocol* (the reference
-  hashes each blob against its manifest's `path` tags, but manifest selection
-  is "newest `created_at` wins" from untrusted relays — rollback and
-  withholding are relay policy, and any pinning is launcher policy).
-- **Metadata impersonation / typosquatting:** `metadata.json` `id` → `d` tag
-  → origin label; nothing binds a `title` to an author, so `Relays` by
-  attacker and `relays` by victim are indistinguishable cards.
-- **Registry/discovery spoofing:** discovery relays (`relay.nostrapps.com`
-  is hard-coded in the reference's `NAPP_RELAYS`) decide which manifests
-  exist; a hostile relay can seed look-alike manifests or withhold the
-  newest one.
+Status: **built + validated** — 18/18 (`tests/evil-08.spec.mjs`)
+
+- **Cross-app traffic analysis arms in every preset** (protocol property, validated from source: `notifyStoreSubs` fans every saved event to every matching subscription, whatever saved it): a plain `nostrdb.subscribe` profiles what every app inserts — counts, kinds, samples — no launcher can close it without splitting the store NAPP.md hands out.
+- **The approval/presence oracle reads the policy off the store**: if another app's gated publishes land, the launcher auto-allows (or a human keeps clicking allow — a presence signal); if its attempts (visible in its result echoes) never land, prompts hold. Either way the napp learns the answer — validated in both directions (auto-allow and prompt).
+- **TOCTOU / unverified bytes, demonstrated**: the harness's debug control re-installs modified bytes mid-session and reloads the window — the relaunched frame detects the change ONLY because this rung hashes its own metadata; nothing in the protocol would. No content addressing anywhere in NAPP.md; manifest selection is newest-`created_at`-wins from untrusted relays (the reference's `fetchManifest`), so a relay withholding the newest version serves a valid, signed, older one; file hashes are launcher practice, not protocol.
+- **Metadata impersonation is an honest `na` in-frame** (nothing to detect — the launcher renders whatever the metadata claims) with the lookalike pair in the kit: `relays`/`reIays` differ by nothing the protocol can check.
+- **Bonus nuance validated**: Chromium's partitioned third-party storage scopes a napp's "own localStorage" per launcher tab — the persistence promise is weaker across multiple launcher tabs than NAPP.md implies (same-tab persistence holds; cross-tab does not).
+- **Deferred**: registry/discovery spoofing end-to-end (the reference's hard-coded `NAPP_RELAYS`) — the mock-relay plumbing exists in the harness for a future rung; the rollback manifest is in the kit.

