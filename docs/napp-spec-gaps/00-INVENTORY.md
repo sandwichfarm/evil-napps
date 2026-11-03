@@ -344,12 +344,30 @@ protocol-armed. Listed so nobody mistakes them for the set above.
 - Registry relay hard-coding (`NAPP_RELAYS`): folds into GAP-08's rung —
   the mock-relay path is exactly where registry behavior gets exercised.
 
-## Triage → PRs
+## Triage → PRs (verified against per-rung evidence)
 
-- **Docs PRs (evidenced):** GAP-01, GAP-02, GAP-03, GAP-04, GAP-05, GAP-06,
-  GAP-07, GAP-09, GAP-10 — one PR each, adding `GAP-0N-<slug>.md` beside
-  this file, each citing spec text, the uncloseable argument, validated
-  evidence, and the protocol change that would close it.
-- **Rung PR (not yet demonstrated):** GAP-08 — new rung `evil-09`
-  (manifest rollback via mock relay withholding), then its PR including the
-  finding doc.
+Every "evidenced" mapping above was re-checked against the committed rung
+docs (`napps/*/README.md`) before any PR was opened:
+
+| Gap | Class | Verified evidence | Deliverable |
+|---|---|---|---|
+| GAP-01 | privacy/spyware | evil-08 `traffic-analysis` — arms in every preset | docs PR |
+| GAP-02 | privacy/spyware | evil-08 approval/presence oracle — validated both directions | docs PR |
+| GAP-03 | privacy/exfiltration | evil-06 nip44 chain (victim note read from store → encrypted to attacker key → exfil); evil-05 poison writes | docs PR |
+| GAP-04 | exfiltration/security | evil-06 NIP-50 search-term payload to attacker relay (RELAY-REQ logged with payload) | docs PR |
+| GAP-05 | security/exfiltration | evil-06 nip44 drop + the full prompt-policy space | docs PR |
+| GAP-06 | security | evil-04 poisoned-result round-trip + `view` wildcard + sole-handler silent pick | docs PR |
+| GAP-07 | security (phishing) | evil-08 metadata impersonation — honest in-frame n/a, lookalike pair in kit | docs PR |
+| GAP-09 | malware/persistence | evil-07 markers survive launcher reloads; SW persistence map | docs PR |
+| GAP-10 | privacy/persistence | evil-08 partitioned-storage nuance — same-tab holds, cross-tab does not | docs PR |
+| GAP-08 | security/malware | evil-08 TOCTOU (in-harness byte swap) + source-validated newest-wins selection; **relay-withholding rollback NOT demonstrated** — the harness has no relay transport (its "mock relay" is bridge-level logging only) | **new rung `evil-09`** + PR |
+
+**evil-09 design** (the only unevidenced gap): a minimal mock WebSocket relay
+(node stdlib RFC6455 server under `tests/`), a faithful miniature of the
+reference `fetchManifest` in the harness (author+d-bound REQ, newest
+`created_at` wins), and a probe proving a relay withholding the newest
+manifest makes the launcher install the older, valid, signed bytes.
+
+**Honest n/a:** no inventoried gap failed the uncloseable test. Closeable
+spec-silences sit in the Excluded table above; parked candidates (self-keyed
+publishing, `installLocal`) stay parked.
