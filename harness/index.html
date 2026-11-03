@@ -126,6 +126,17 @@
     <label><input type="checkbox" name="victimnoisy"> victim makes gated publishes (evil-08 oracle)</label>
   </fieldset>
   <fieldset>
+    <legend>manifest source (evil-09)</legend>
+    <label>source
+      <select name="source">
+        <option value="local" selected>local — /napps/&lt;id&gt;/ files (default)</option>
+        <option value="relay">relay — kind 35130 manifests from the mock relays (run tests/_mockrelay.mjs)</option>
+      </select>
+    </label>
+    <label><input type="checkbox" name="withhold"> relay-a withholds the newest manifest (the rollback)</label>
+    <label>mock relay port <input type="text" name="relayport" value="9101" spellcheck="false" style="width:70px"></label>
+  </fieldset>
+  <fieldset>
     <legend>napp</legend>
     <select id="nappSel"></select>
     <button type="button" id="loadBtn">load napp</button>

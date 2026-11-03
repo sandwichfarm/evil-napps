@@ -30,5 +30,9 @@
   {
     "id": "evil-08-hardened-oracles",
     "title": "evil-08 hardened oracles"
+  },
+  {
+    "id": "evil-09-manifest-rollback",
+    "title": "evil-09 manifest rollback"
   }
 ]
