@@ -63,9 +63,9 @@ marked as such in [ROADMAP.md](ROADMAP.md).
 | 0 | Launcher misconfig — iframe sandbox/origin mistakes, unsigned `metadata.json` rendered as HTML, unvalidated action routing, missing launcher CSP | `evil-01` frame escape ✅, `evil-02` launcher XSS ✅ |
 | 1 | Bridge confusion — forged postMessage envelopes, reply injection, `registerAction` namespace squatting | `evil-03` bridge forge ✅, `evil-04` action squat ✅ |
 | 2 | Shared state & authority abuse — `nostrdb` poisoning, silent signing, nip04/nip44 exfil, direct-relay egress, service-worker persistence | `evil-05` store poison ✅, `evil-06` signer abuse ✅, `evil-07` persistence ✅ |
-| 3 | Well-hardened launchers — what even a perfect launcher can't stop: cross-app traffic analysis, approval/presence oracles, URL-hosted TOCTOU, metadata impersonation | `evil-08` hardened oracles ✅ |
+| 3 | Well-hardened launchers — what even a perfect launcher can't stop: cross-app traffic analysis, approval/presence oracles, URL-hosted TOCTOU, metadata impersonation, manifest rollback from relay withholding | `evil-08` hardened oracles ✅, `evil-09` manifest rollback ✅ |
 
-**All eight rungs are built and validated** — 164 automated checks against real
+**All nine rungs are built and validated** — 195 automated checks against real
 Chromium (`tests/`). Per-rung status and validated findings (including the
 source-validated reference-launcher gaps) live in [ROADMAP.md](ROADMAP.md),
 and each napp folder carries its own README (rows, arming knobs, payloads):
@@ -80,6 +80,7 @@ and each napp folder carries its own README (rows, arming knobs, payloads):
 | [evil-06 signer abuse](napps/evil-06-signer-abuse/) | 22 | the full prompt-policy space (deny holds / dialog-measurable / auto-allow = silent signing); nip44-to-attacker-key private-data drop; `utils.subscribe` filter-as-payload exfil (reads never prompt) |
 | [evil-07 persistence](napps/evil-07-persistence/) | 18 | the reference stubs the SW slot (validated from source); unstubbed = real attempts; **the at-launcher mistake lets the shipped SW register at the launcher origin and serve its own bytes**; markers survive launcher reloads |
 | [evil-08 hardened oracles](napps/evil-08-hardened-oracles/) | 18 | store-traffic analysis **arms in every preset** (a protocol property); the approval/presence oracle reads the policy off the store; TOCTOU demonstrated (no content addressing anywhere in NAPP.md); partitioned-storage nuance |
+| [evil-09 manifest rollback](napps/evil-09-manifest-rollback/) | 31 | **rollback validated end to end**: a relay withholding the newest kind 35130 manifest makes the launcher install the older, valid, BIP340-signed one (real fixtures, mock relays); the author binding holds id takeover — newest-wins still arms; no pinning anywhere in NAPP.md |
 
 Each rung is a self-contained NAPP artifact folder
 (`napps/<id>/{index.html,metadata.json}`) you can install into **any** NAPP
@@ -92,9 +93,10 @@ delegations, result echoes — is what the rungs attack).
 ## Running locally
 
 ```bash
-node build.mjs                        # build napps/<id>/ from src/
-for i in 01 02 03 04 05 06 07 08; do node tests/evil-$i.spec.mjs; done   # the whole suite
+node build.mjs                        # build napps/<id>/ from src/ (evil-09's signed fixtures too)
+for i in 01 02 03 04 05 06 07 08 09; do node tests/evil-$i.spec.mjs; done   # the whole suite
 node tests/_server.mjs 8899            # or serve manually → http://localhost:8899/harness/
+node tests/_mockrelay.mjs 9101        # evil-09's mock relays (the spec spawns its own)
 ```
 
 The specs spin up their own static server (`tests/_server.mjs` — node, not
@@ -142,6 +144,11 @@ different subset of the attacks:
 - **launcher input bar** — the launcher's own `profile` / `view:1` dispatches
   (evil-04's target) and a byte-swap debug control (evil-08's TOCTOU
   demonstration).
+- **manifest source** (evil-09) — install the napp from local files
+  (default) or through the launcher's kind 35130 manifest fetch: two mock
+  relays (`tests/_mockrelay.mjs`), the author-bound newest-created_at-wins
+  selection of the reference, files sha-verified by hash, and a **withhold**
+  knob that makes relay-a withhold the newest manifest — the rollback.
 
 It also seeds launcher canaries (fake `nsec` and grant records in launcher
 `localStorage`), logs every ACCEPTED/DROPPED bridge message, and dumps the
@@ -151,12 +158,16 @@ green gate** your launcher's CI should hold.
 ## Repo layout
 
 ```
-build.mjs                             # assembles src → napps/<id>/
+build.mjs                             # assembles src → napps/<id>/ (and regenerates evil-09's fixtures)
 src/
   chrome.template.html                # shared napp chrome: probes UI, arm gate, report
   napps/<id>/{attacks.js,meta.json}   # the ONLY per-napp code
+tools/
+  bip340.mjs                          # dependency-free BIP340 sign/verify + nostr event ids
+  make-evil09-fixtures.mjs            # signs the rung's built bytes as real kind 35130 manifests
 napps/
   <id>/{index.html,metadata.json}     # built single-folder NAPP artifacts (committed)
+  evil-09-manifest-rollback/fixtures/ # real BIP340-signed manifests + blobs (committed, rebuilt)
   victim/{index.html,metadata.json}   # static benign victim app (harness fixture)
 boot.html                             # per-origin boot frame (SW registration + IDB install)
 sw.js                                 # per-origin service worker (file serving, bridge injection)
@@ -166,8 +177,10 @@ harness/
                                       #   so the strict-CSP knob can hold inline handlers)
 tests/
   _server.mjs                        # node static server with per-request header control
+  _mockrelay.mjs                      # evil-09's two virtual relays (stdlib WebSocket)
   _helper.mjs + evil-NN.spec.mjs      # Playwright checks vs real Chromium
 ROADMAP.md                            # attack ladder + validated NAPP protocol findings
+docs/napp-spec-gaps/                  # the impossible-to-close gap inventory + one doc per gap
 ```
 
 Evil napps use their own dark palette (a red-team tool must stay legible even

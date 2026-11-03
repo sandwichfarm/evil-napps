@@ -74,6 +74,9 @@ export async function loadHarness(page, opts = {}) {
   if (typeof opts.removegate === 'boolean') opts.removegate ? await page.check('input[name="removegate"]') : await page.uncheck('input[name="removegate"]');
   if (typeof opts.swstub === 'boolean') opts.swstub ? await page.check('input[name="swstub"]') : await page.uncheck('input[name="swstub"]');
   if (typeof opts.victimnoisy === 'boolean') opts.victimnoisy ? await page.check('input[name="victimnoisy"]') : await page.uncheck('input[name="victimnoisy"]');
+  if (opts.source) await page.selectOption('select[name="source"]', opts.source);
+  if (typeof opts.withhold === 'boolean') opts.withhold ? await page.check('input[name="withhold"]') : await page.uncheck('input[name="withhold"]');
+  if (opts.relayport) await page.fill('input[name="relayport"]', String(opts.relayport));
   const wantId = opts.napp || await page.$eval('#nappSel', (el) => el.value);
   if (opts.napp) await page.selectOption('#nappSel', opts.napp);
   if (opts.lcsp) {
@@ -103,10 +106,14 @@ export async function findEvilFrame(page, wantId) {
 }
 
 export async function waitSettled(f, ms) {
+  // polling: interval, NOT the default rAF — a napp window can sit below the
+  // fold (the harness control panel is tall), and Chromium pauses rAF in
+  // offscreen iframes while the napp's own timers keep running. rAF polling
+  // stalls forever even after every row has settled.
   await f.waitForFunction(() => {
     const rows = document.querySelectorAll('.attack');
     return rows.length > 0 && Array.from(rows).every((r) => r.dataset.status && r.dataset.status !== 'pending');
-  }, null, { timeout: ms + 8000 });
+  }, null, { timeout: ms + 8000, polling: 200 });
 }
 
 export async function statuses(f) {
