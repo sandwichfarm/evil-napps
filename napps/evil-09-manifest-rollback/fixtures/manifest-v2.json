@@ -1,0 +1,34 @@
+{
+  "pubkey": "57eb713288cf203e990dee84db9ce8ead84509f1f471682eacc0363abaefba60",
+  "created_at": 1735776000,
+  "kind": 35130,
+  "tags": [
+    [
+      "d",
+      "evil-09-manifest-rollback"
+    ],
+    [
+      "title",
+      "evil-09 manifest rollback"
+    ],
+    [
+      "version",
+      "v2"
+    ],
+    [
+      "path",
+      "/index.html",
+      "06934f1ecc8a8f5cc9a6eb759f96f56701ca127763d8bade587dd06999c7be2c",
+      "text/html"
+    ],
+    [
+      "path",
+      "/metadata.json",
+      "fc859d90d3bc54234047cec7f0d77a07c442a6c3f4e13216ea1fcdc5d8e09f26",
+      "application/json"
+    ]
+  ],
+  "content": "",
+  "id": "fd032a983ba1db4027021ebc1ddd4d475431c256fcd6b99929574a6386899e87",
+  "sig": "481693205e65d6728eb14f5ba1849e6678bc47f9dff875f592560991dd8498c245168283fc6b0834f902358bc9029aedfa337044ef397f9e67febbaf17ac5ff4"
+}

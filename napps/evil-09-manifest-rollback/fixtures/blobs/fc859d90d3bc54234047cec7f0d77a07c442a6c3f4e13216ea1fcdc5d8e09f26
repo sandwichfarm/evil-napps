@@ -1,0 +1,7 @@
+{
+  "id": "evil-09-manifest-rollback",
+  "title": "evil-09 manifest rollback",
+  "description": "Red team: the fetch-side half of the unverified-bytes gap — kind 35130 manifest selection is newest-created_at-wins from untrusted relays (reference practice; NAPP.md specifies nothing), so a relay withholding the newest version serves an older, valid, signed one and the launcher installs it. Demonstrated end-to-end against two mock relays serving real BIP340-signed manifests. Demo by default; VERY EVIL mode behind a typed gate.",
+  "requires": [],
+  "actions": []
+}

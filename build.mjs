@@ -5,7 +5,7 @@
 // for the harness picker.
 import { readFileSync, writeFileSync, readdirSync, mkdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const src = join(root, 'src');
@@ -57,3 +57,14 @@ for (const id of readdirSync(join(src, 'napps')).sort()) {
 if (!manifest.length) throw new Error('no napps found under src/napps/');
 writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
 console.log('built napps/manifest.json (' + manifest.length + ' napps)');
+
+// evil-09's manifest fixtures are built FROM the built bytes (each fixture
+// manifest's path tags name its own index.html by sha256) — regenerate them
+// whenever the rung is present, so fixtures can never drift from the built
+// artifacts. Real BIP340 signatures, deterministic output.
+const fixturesTool = join(root, 'tools', 'make-evil09-fixtures.mjs');
+if (existsSync(fixturesTool) && existsSync(join(outDir, 'evil-09-manifest-rollback'))) {
+  const { makeFixtures } = await import(pathToFileURL(fixturesTool).href);
+  await makeFixtures(outDir);
+  console.log('regenerated napps/evil-09-manifest-rollback/fixtures/');
+}

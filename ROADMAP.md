@@ -167,4 +167,44 @@ Status: **built + validated** — 18/18 (`tests/evil-08.spec.mjs`)
 - **TOCTOU / unverified bytes, demonstrated**: the harness's debug control re-installs modified bytes mid-session and reloads the window — the relaunched frame detects the change ONLY because this rung hashes its own metadata; nothing in the protocol would. No content addressing anywhere in NAPP.md; manifest selection is newest-`created_at`-wins from untrusted relays (the reference's `fetchManifest`), so a relay withholding the newest version serves a valid, signed, older one; file hashes are launcher practice, not protocol.
 - **Metadata impersonation is an honest `na` in-frame** (nothing to detect — the launcher renders whatever the metadata claims) with the lookalike pair in the kit: `relays`/`reIays` differ by nothing the protocol can check.
 - **Bonus nuance validated**: Chromium's partitioned third-party storage scopes a napp's "own localStorage" per launcher tab — the persistence promise is weaker across multiple launcher tabs than NAPP.md implies (same-tab persistence holds; cross-tab does not).
-- **Deferred**: registry/discovery spoofing end-to-end (the reference's hard-coded `NAPP_RELAYS`) — the mock-relay plumbing exists in the harness for a future rung; the rollback manifest is in the kit.
+- **Deferred**: registry relay-list spoofing beyond the manifest path (the
+  reference's hard-coded `NAPP_RELAYS` as a discovery trust anchor) — the
+  mock-relay harness from evil-09 now exists for a future rung; the
+  manifest/discovery path itself (hostile relay ignoring the filter,
+  withholding the newest, foreign clones) is demonstrated by evil-09.
+
+### ✅ `evil-09-manifest-rollback` — the publication trust model
+
+Status: **built + validated** — 31/31 (`tests/evil-09.spec.mjs`)
+
+NAPP.md's entire publication story is two sentences ("published as kind
+`35130`" + "served through a service worker backed by local storage") — no
+selection rule, no verification, no pinning. This rung demonstrates the
+reference's practice (validated from source, `src/nsite/fetch.ts`) end to
+end, through two mock relays (`tests/_mockrelay.mjs`) serving **real
+BIP340-signed kind 35130 manifests** (`napps/evil-09-manifest-rollback/fixtures/`,
+generated from the rung's own built bytes, re-verified every spec run), with
+a faithful `fetchManifest` miniature behind the harness's new **manifest
+source** knob:
+
+- **ROLLBACK VALIDATED END TO END**: a relay withholding the newest
+  manifest makes the launcher install the older, valid, signed one —
+  author-bound REQ, newest-`created_at`-wins over what it was shown, files
+  sha-verified on fetch; everything "right", older bytes installed. The
+  relaunched frame proves it only because the rung embeds its own version
+  marker; nothing in the protocol would. The fixtures are real — every
+  spec run re-verifies each manifest's id (sha256 of the serialized event)
+  and BIP340 signature, and `@nostr/tools` (the reference's own crypto)
+  accepts all three.
+- **The honest counterpoint is machine-checked in the same rung**: the
+  hostile relay also serves a foreign clone — the NEWEST manifest of all,
+  same d tag, different key — and the launcher's client-side author
+  binding (fetchManifest's `e.pubkey === pubkey`) drops it. **Id takeover
+  is held; rollback still arms** — the binding can't tell "rolled back"
+  from "current", because both manifests are by the real author.
+- **TOCTOU (evil-08's byte-swap, the install side)**: the napp's install
+  record (`d` tag + `window.name` instance id) pins no manifest hash — the
+  user approved a NAME, and the protocol never binds that name to the
+  bytes that run.
+
+Full finding: `docs/napp-spec-gaps/GAP-08-publication-trust-model.md`.

@@ -78,6 +78,9 @@
       removegate: f.get('removegate') === 'on',
       swstub: f.get('swstub') === 'on',
       victimnoisy: f.get('victimnoisy') === 'on',
+      source: f.get('source'),
+      withhold: f.get('withhold') === 'on',
+      relayport: f.get('relayport') || '9101',
       napp: nappSel.value,
     };
   }
@@ -112,6 +115,9 @@
       if (k.router) controls.querySelector('select[name="router"]').value = k.router;
       if (k.prompts) controls.querySelector('select[name="prompts"]').value = k.prompts;
       if (k.pickpolicy) controls.querySelector('select[name="pickpolicy"]').value = k.pickpolicy;
+      if (k.source) controls.querySelector('select[name="source"]').value = k.source;
+      if (typeof k.withhold === 'boolean') controls.querySelector('input[name="withhold"]').checked = k.withhold;
+      if (k.relayport) controls.querySelector('input[name="relayport"]').value = k.relayport;
       return k;
     } catch (_) { return {}; }
   }
@@ -345,6 +351,95 @@
       { path: '/index.html', body: html, mime: 'text/html' },
       { path: '/metadata.json', body: JSON.stringify(m), mime: 'application/json' },
     ]};
+  }
+
+  // ── manifest source: the reference's fetchManifest, in miniature ────────
+  // NAPP.md's whole publication story is "published as kind 35130" + "served
+  // through a service worker backed by local storage" — no selection rule,
+  // no verification, no pinning. This path is the reference's practice,
+  // faithfully (src/nsite/fetch.ts): an author-bound REQ to each relay,
+  // a client-side author filter (a hostile relay may ignore the REQ filter),
+  // newest created_at wins, files fetched by sha256 from the manifest's path
+  // tags and hash-verified. The author a launcher binds by comes from the
+  // pointer (share link / card); here, from the rung's committed fixtures.
+  async function relayAuthorFor(nappId) {
+    try {
+      const r = await fetch('/napps/' + nappId + '/fixtures/author-pubkey.txt').then(r => r.ok ? r.text() : null);
+      return r ? r.trim() : null;
+    } catch (_) { return null; }
+  }
+  async function relayAsk(url, filter) {
+    return new Promise(resolve => {
+      const out = [];
+      let ws;
+      try { ws = new WebSocket(url); } catch (e) { return resolve(out); }
+      const timer = setTimeout(() => { try { ws.close(); } catch (_) {} resolve(out); }, 5000);
+      ws.onopen = () => { ws.send(JSON.stringify(['REQ', 'q' + (++instanceSerial), filter])); };
+      ws.onmessage = (m) => {
+        let d; try { d = JSON.parse(m.data); } catch (_) { return; }
+        if (Array.isArray(d) && d[0] === 'EVENT' && d[2]) out.push(d[2]);
+        else if (Array.isArray(d) && d[0] === 'EOSE') { clearTimeout(timer); try { ws.close(); } catch (_) {} resolve(out); }
+      };
+      ws.onerror = () => { clearTimeout(timer); resolve(out); };
+    });
+  }
+  async function fetchNappFilesViaRelay(nappId) {
+    const k = knobValues();
+    const port = String(k.relayport || '9101').replace(/[^0-9]/g, '') || '9101';
+    const author = await relayAuthorFor(nappId);
+    if (!author) {
+      log('[relay] no known author for ' + nappId + ' — falling back to local files');
+      return await fetchNappFiles(nappId);
+    }
+    const urlA = 'ws://localhost:' + port + '/relay-a' + (k.withhold ? '?withhold=1' : '');
+    const urlB = 'ws://localhost:' + port + '/relay-b';
+    const filter = { kinds: [35130], authors: [author], '#d': [nappId] };
+    log('[relay] asking ' + urlA + (k.withhold ? ' (WITHHOLDING the newest)' : '') + ' and ' + urlB + ' for kind 35130 d=' + nappId + ' by ' + author.slice(0, 12) + '…');
+    const [fromA, fromB] = await Promise.all([relayAsk(urlA, filter), relayAsk(urlB, filter)]);
+    const ver = ev => (ev.tags.find(t => t[0] === 'version') || [])[1] || 'created_at ' + ev.created_at;
+    log('[relay] relay-a answered: ' + (fromA.length ? fromA.map(ver).join(', ') : 'nothing'));
+    log('[relay] relay-b answered: ' + (fromB.length ? fromB.map(ver).join(', ') : 'nothing'));
+    // fetchManifest's client-side author binding — "relays are trusted with
+    // the filter but not blindly": a hostile relay may ignore the filter and
+    // serve foreign manifests; the launcher drops everything not by the
+    // author the pointer named.
+    const all = fromA.concat(fromB);
+    const bound = all.filter(e => e.pubkey === author);
+    if (bound.length < all.length) {
+      const dropped = all.filter(e => e.pubkey !== author);
+      const newestAll = all.slice().sort((a, b) => b.created_at - a.created_at)[0];
+      log('[relay] author binding DROPPED ' + dropped.length + ' foreign manifest(s): ' + dropped.map(ver).join(', ') +
+        (newestAll && newestAll.pubkey !== author ? ' — the foreign clone was the NEWEST answer of all; without the binding it would have won (id takeover HELD here)' : ''));
+    }
+    const manifest = bound.slice().sort((a, b) => b.created_at - a.created_at)[0] || null;
+    if (!manifest) { log('[manifest] no manifest from any relay'); return await fetchNappFiles(nappId); }
+    log('[manifest] selected ' + ver(manifest) + ' (created_at ' + manifest.created_at + ') — newest-created_at-wins over: ' + (bound.map(ver).join(', ') || 'nothing'));
+    // the honest oracle — test instrumentation only, NOT a launcher ability:
+    // compare the selection against the fixtures on disk, so the log can say
+    // "withheld" where the protocol can only say "this is all there is".
+    try {
+      const newest = await fetch('/napps/' + nappId + '/fixtures/manifest-v2.json').then(r => r.ok ? r.json() : null);
+      if (newest && newest.pubkey === author && manifest.created_at < newest.created_at) {
+        log('[manifest] ⚠ ROLLBACK: the newest signed manifest (v2, created_at ' + newest.created_at + ') EXISTS but no relay served it — installing the older ' + ver(manifest) + '. The protocol cannot distinguish withholding from "this is all there is"');
+      }
+    } catch (_) {}
+    // files: ["path", path, sha, mime?] tags, fetched by sha and verified
+    const paths = manifest.tags
+      .filter(t => t[0] === 'path' && t[1] && t[2])
+      .map(t => ({ path: t[1].startsWith('/') ? t[1] : '/' + t[1], sha: t[2], mime: t[3] || 'text/plain' }));
+    const files = [];
+    for (const p of paths) {
+      const res = await fetch('http://localhost:' + port + '/b/' + p.sha);
+      if (!res.ok) throw new Error('blob miss for ' + p.path + ' (' + p.sha.slice(0, 10) + '…)');
+      const body = await res.text();
+      const got = await sha256Hex(body);
+      if (got !== p.sha) throw new Error('blob sha mismatch for ' + p.path);
+      log('[manifest] ' + p.path + ' fetched by sha ' + p.sha.slice(0, 10) + '… — hash VERIFIED (file integrity holds; the manifest itself is what nothing pins)');
+      files.push({ path: p.path, body, mime: p.mime });
+    }
+    const metaFile = files.find(f => f.path === '/metadata.json');
+    const meta = metaFile ? JSON.parse(metaFile.body) : {};
+    return { meta, files };
   }
 
   // ── mount: the visible window + iframe ────────────────────────────────────
@@ -705,7 +800,12 @@
     }
     const label = await labelFor(opts.nappId, knobs.scheme);
     const origin = originForLabel(label);
-    const { meta: m, files } = await fetchNappFiles(opts.nappDir);
+    let m, files;
+    if (knobs.source === 'relay' && !opts.isVictim) {
+      ({ meta: m, files } = await fetchNappFilesViaRelay(opts.nappId));
+    } else {
+      ({ meta: m, files } = await fetchNappFiles(opts.nappDir));
+    }
     const policy = policyFor();
     await bootNapp(opts.nappId, origin, files, policy);
     const w = mount({
@@ -729,7 +829,7 @@
     document.getElementById('referrerMeta').setAttribute('content',
       knobs.referrer === 'full' ? 'unsafe-url' : 'strict-origin-when-cross-origin');
     teardown();
-    log('── load: preset=' + knobs.preset + ' scheme=' + knobs.scheme + ' atlauncher=' + knobs.atlauncher + ' victim=' + knobs.victim + ' referrer=' + knobs.referrer + ' render=' + knobs.render + ' lcsp=' + knobs.lcsp + ' router=' + knobs.router + ' prompts=' + knobs.prompts + ' pickpolicy=' + knobs.pickpolicy + ' bootcheck=' + knobs.bootcheck + ' removegate=' + knobs.removegate + ' swstub=' + knobs.swstub + ' victimnoisy=' + knobs.victimnoisy);
+    log('── load: preset=' + knobs.preset + ' scheme=' + knobs.scheme + ' atlauncher=' + knobs.atlauncher + ' victim=' + knobs.victim + ' referrer=' + knobs.referrer + ' render=' + knobs.render + ' lcsp=' + knobs.lcsp + ' router=' + knobs.router + ' prompts=' + knobs.prompts + ' pickpolicy=' + knobs.pickpolicy + ' bootcheck=' + knobs.bootcheck + ' removegate=' + knobs.removegate + ' swstub=' + knobs.swstub + ' victimnoisy=' + knobs.victimnoisy + ' source=' + knobs.source + (knobs.source === 'relay' ? ' (withhold=' + knobs.withhold + ' port=' + knobs.relayport + ')' : ''));
 
     let evilLaunched = false;
     if (knobs.victim) {
